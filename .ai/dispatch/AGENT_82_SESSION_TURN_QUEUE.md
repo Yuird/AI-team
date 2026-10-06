@@ -5,8 +5,8 @@ status: active              # ready | active | blocked | done | dead
 owner: worker-a82-stage4e
 depends_on: []
 results_ref: DISPATCH_LOG.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: tests/test_turn_queue_respawn_revalidation.py                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-27T15:38:56.372194+00:00"
+evidence: tests/test_turn_queue_stage8a.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T12:25:38.065511+00:00"
 ```
 
 # A82 — Build the unified session turn queue
@@ -2495,5 +2495,16 @@ resolved above. Stage 1 authorized (assertion-capable red tests); Stage 2 gated 
 
 ## 17. Closure
 
-Pending implementation. Acceptance of this packet authorizes the work and tests
+**2026-10-06 — Stage 8a integrated onto current `main` (Yuird/AI-team issue #14; merge-only).**
+`main` merged into `feat/a82-stage8a` @ `0b34905` (merge commit; reviewed history kept). Conflicts:
+`control_api.py` (8a's `/health` coverage + authed `GET /api/turn-queue/coverage` ported into
+`routes/monitoring.py`, review-F2 refusal into `routes/sessions.py`; auth-coverage guard green),
+`CONTEXT.md` and the generated `_DISPATCH_STATE.md`. `db.py` / `orchestrator.py` auto-merged with both
+sides' hunks byte-preserved; migrations contiguous 1..43. Cross-path guard added: a pending legacy row
+failed by migration 43 still resolves its Manager's wait via the task-truth backfill
+(`tests/test_recovery_wait_resolution.py`). Status stays **active — 8a merged, deploy pending**: R1
+worker restarts, controller rebuild and live verification belong to the owner's ship batch (runbook in
+the PR body and the Stage 8a section above). 8b (delete legacy session execution) not started.
+
+Pending implementation (remaining stages). Acceptance of this packet authorizes the work and tests
 above; it does not assert that the design already passed its backend proof gates.

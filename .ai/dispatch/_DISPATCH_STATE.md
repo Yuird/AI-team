@@ -5,7 +5,7 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ | STALE_63d |
-| active | AGENT_82_SESSION_TURN_QUEUE | 2026-09-22 | 2026-09-27 | — | ✓ |  |
+| active | AGENT_82_SESSION_TURN_QUEUE | 2026-09-22 | 2026-10-06 | — | ✓ |  |
 | active | AGENT_84_WORKER_COMPLETION_OUTBOX | 2026-09-24 | 2026-10-02 | AGENT_82_SESSION_TURN_QUEUE | — |  |
 | active | AGENT_87_SESSION_RUNTIME_COORDINATOR | 2026-09-24 | 2026-09-25 | — | — |  |
 | active | AGENT_88_DATABASE_AUTHORITY_UNIFICATION | 2026-09-26 | 2026-10-06 | — | ✓ |  |
