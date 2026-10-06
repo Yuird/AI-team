@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_88_DATABASE_AUTHORITY_UNIFICATION
 created_at: "2026-09-26T16:09:11.750309+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: blocked              # ready | active | blocked | done | dead
 owner: claude-session-2026-10-02:feat/database-authority-unification
 depends_on: []
 results_ref: DISPATCH_LOG.md#A88             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: ["docs/backend/DATABASE_AUTHORITY.md", "tests/test_database_authority.py", "tests/test_database_authority_process.py", "scripts/db_authority_report.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-06T11:26:44.000161+00:00"
+updated_at: "2026-10-06T12:35:13.405743+00:00"
 ```
 
 # DISPATCH — A88 · Controller/worker database authority unification
@@ -116,3 +116,5 @@ The intended end state is one canonical controller-owned control-plane and runti
 ## Closure (fill on completion)
 
 (Do not mark done until the inventory demonstrates that every discovered duplicate authority was either eliminated or explicitly classified as non-canonical worker-private state, with evidence.)
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → blocked — code merged (PR #180 `684b506`); only the worker restart + `DATABASE_AUTHORITY.md` §6 steps in the owner's next ship batch remain.

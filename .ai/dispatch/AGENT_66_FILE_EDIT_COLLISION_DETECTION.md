@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_66_FILE_EDIT_COLLISION_DETECTION
 created_at: "2026-08-03T18:16:59.626024+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: blocked              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T18:16:59.626047+00:00"
+updated_at: "2026-10-06T12:35:13.947105+00:00"
 ```
 
 # DISPATCH — A66 · File-edit collision detection for concurrent workers
@@ -127,3 +127,5 @@ a branch; don't merge over another loop's edits. Gateway restart only if merged 
 
 ## Closure (fill on completion)
 (fill when executed)
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → blocked — deferred: off the current roadmap; build needs A62 first.

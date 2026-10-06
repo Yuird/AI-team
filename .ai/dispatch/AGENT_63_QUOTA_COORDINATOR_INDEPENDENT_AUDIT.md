@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT
 created_at: "2026-08-01T13:48:33+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: dead              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:20:23.195320+00:00"
+updated_at: "2026-10-06T12:35:12.566564+00:00"
 ```
 
 # DISPATCH — A63 · Quota coordinator: independent audit of the direct-to-main finalization commit
@@ -152,6 +152,8 @@ explicitly out per A61 too). Building anything not already claimed by A61's scop
 
 ## Closure (fill on completion)
 (fill when executed)
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → dead — superseded: audit targets were deleted or moved; residual test/doc items folded into burn #4.
 
 **Residual note (2026-10-06, cloud-burn issue #4 / PR Yuird/AI-team#18 — status left to the owner, #3):**
 the surviving test residual — no test covered the orchestrator's refusal-ingest
