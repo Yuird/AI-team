@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_60_WARM_WORKER_IDLE_REAPER
 created_at: "2026-07-30T03:07:45+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: "claude"
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: ["tests/test_warm_worker_idle_reaper.py"]
-updated_at: "2026-08-21T15:10:00.000000+00:00"
+updated_at: "2026-10-06T11:26:42.581037+00:00"
 ```
 
 # DISPATCH — A60 · Warm-worker idle-reaper (§7 resource leak)
@@ -139,3 +139,11 @@ predicts: 3 real orphaned worker sessions on a 6-day-uptime worker daemon, confi
 Implemented as scoped in SEAM MAP: reused `_stale_busy_reconciliation_loop`, no new scheduler; reuses
 `session_service.close_session` + `_clear_session_case_affiliation`, no new close mechanism. PR open
 next.
+
+**Reconciled 2026-10-06 (burn-down triage, `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status set
+`done`. The reaper is on `main`: `TaskOrchestrator._reap_idle_warm_workers_once`
+(`src/orchestrator.py`, called from `_stale_busy_reconciliation_loop`), `MeshDB.list_idle_warm_workers`,
+`MESH_WARM_WORKER_IDLE_TTL_SEC` (`config/settings.py`, default 3600, `0` disables), and
+`tests/test_warm_worker_idle_reaper.py`. It was already present at the 2026-09-18 history boundary of this
+clone. Open for the operator: **ratify the default-ON (3600 s) choice**, which the implementer made
+without an explicit operator R1 ruling.

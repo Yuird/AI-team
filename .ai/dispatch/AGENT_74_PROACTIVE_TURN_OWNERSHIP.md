@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_74_PROACTIVE_TURN_OWNERSHIP
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A74 (PR #75)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:24:54.161536+00:00"
+evidence: ["tests/test_proactive_turn_delivery.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T11:26:43.658585+00:00"
 ```
 
 # DISPATCH — AGENT_74_PROACTIVE_TURN_OWNERSHIP

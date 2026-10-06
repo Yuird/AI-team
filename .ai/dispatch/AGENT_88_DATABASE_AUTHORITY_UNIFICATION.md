@@ -5,8 +5,8 @@ status: active              # ready | active | blocked | done | dead
 owner: claude-session-2026-10-02:feat/database-authority-unification
 depends_on: []
 results_ref: DISPATCH_LOG.md#A88             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: docs/backend/DATABASE_AUTHORITY.md,tests/test_database_authority.py,tests/test_database_authority_process.py,scripts/db_authority_report.py                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-01T22:10:17.101887+00:00"
+evidence: ["docs/backend/DATABASE_AUTHORITY.md", "tests/test_database_authority.py", "tests/test_database_authority_process.py", "scripts/db_authority_report.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T11:26:44.000161+00:00"
 ```
 
 # DISPATCH — A88 · Controller/worker database authority unification

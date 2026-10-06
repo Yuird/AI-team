@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_24_DECOMPOSER_GENERATOR
 created_at: "2026-07-07T13:37:34+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: blocked              # ready | active | blocked | done | dead
+status: dead              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:20:18.751160+00:00"
+updated_at: "2026-10-06T11:26:44.147623+00:00"
 ```
 
 # AGENT_24 — Decomposer generator: salvage MAX's one real pattern as a by-hand DRAFT front-half
@@ -127,3 +127,9 @@ code, **stop and surface it** — that's a different (M3) dispatch and an operat
 - [ ] Advance DISPATCH_LOG row; append `## Closure`
 
 **Next action:** read the three sibling generators, then draft `decomposer.md`.
+
+## Closure (2026-10-06 — superseded)
+Status set `dead` in burn-down triage (`.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`). A56 (done) shipped
+`docs/harness/generators/decomposer.md`, which explicitly "resum[es] the intent of the stalled
+`AGENT_24_DECOMPOSER_GENERATOR.md`" on the M2.5 Case substrate (approved-only, task-DAG as Case data,
+`decompose_case`). Nothing of A24 remains to build.

@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_73_NODE_ENV_FILE_GUARD
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A73 (PR #74)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:23:13.844770+00:00"
+evidence: ["tests/test_safe_worker_deploy_env_guard.py", "scripts/safe_worker_deploy.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T11:26:43.329484+00:00"
 ```
 
 # DISPATCH — AGENT_73_NODE_ENV_FILE_GUARD
