@@ -79,9 +79,12 @@ make CI or a reviewer reject it.
 - Never carry another workstream's edits into your branch.
 
 ## Coordination labels
-`burn:ready` (workable now) · `burn:blocked` (waiting on a prerequisite issue) ·
-`burn:defer` (valid but parked) · `burn:decision` (owner ruling needed, do not
-implement) · `burn:obsolete` (no work). Work only `burn:ready` issues. If you are
-pointed at any other issue, stop and report the label. The triage record that produced
-the issues (classification of every job, with evidence) is
-`.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`.
+The roadmap, label legend and dispatch order live in the tracker issue **#13**.
+Milestones W0–W4 are the waves. Labels are owner/governor-managed, so workers read them
+and never change them.
+- **`burn:` status.** Work only `burn:ready`. For any other status, stop and report the
+  label. A `gate:owner-*` label means the owner must act first.
+- **`deploy:` labels.** These name the operator step needed after merge. List that step in
+  your PR, and never perform it.
+- **Triage record.** The classification of every job, with evidence, is in
+  `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`.
