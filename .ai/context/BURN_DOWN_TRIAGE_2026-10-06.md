@@ -72,9 +72,13 @@ The live roadmap is the tracker issue **#13**. It has:
 - the label taxonomy: `burn:` status, `gate:` blocker, `area:`, `track:` cohort, `type:`, `level:`
   and `deploy:` after-merge step.
 
-The order is:
-- **W1:** #4 and #5.
-- **#7:** independent of everything, so it is safe to pull into W1.
-- **#6:** after #4.
-- **W3:** after the owner answers #1.
-- **#10:** after #9.
+Dispatch runs in waves of at most 3 workers. The next wave starts only after the current wave has
+results and the graph has been recomputed (`BURN_GOVERNOR.md`).
+- **Wave 1 (2026-10-06):** #4, #5 and #14. #14 is the Stage 8a integration that resolved #1.
+- **Candidates after wave 1:**
+  - #6, after #4;
+  - #7;
+  - #11 and #8, after #14 merges;
+  - #9, after `/approve`;
+  - #10, after #9.
+- **Decisions:** #1 and #2 were resolved on 2026-10-06. #3 was applied on owner ruling.

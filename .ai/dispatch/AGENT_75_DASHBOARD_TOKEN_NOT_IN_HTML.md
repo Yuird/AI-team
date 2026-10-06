@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: dead              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T09:34:34.482453+00:00"
+updated_at: "2026-10-06T12:35:13.055088+00:00"
 ```
 
 # DISPATCH — AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML
@@ -60,3 +60,5 @@ hygiene gap, and that the clean fix is best done together with the credential wo
 - Served dashboard HTML no longer contains the token literal; TokenGate flow verified green.
 - Targeted `pytest` evidence recorded; PR merged to `main`; gateway restarted and `/health` ok.
 - Set `evidence:` to the test report + PR ref and `status: done`.
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → dead — superseded by the trusted-tailnet-peer injection model (upstream PRs 156–158); WORKER_TOKEN fallback residual moved to burn #8.

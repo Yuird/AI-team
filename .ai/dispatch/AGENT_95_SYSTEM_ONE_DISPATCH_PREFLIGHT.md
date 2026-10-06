@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT
 created_at: "2026-10-05T08:46:34.378580+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: blocked              # ready | active | blocked | done | dead
 owner: ""
-depends_on: AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD
+depends_on: ["AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD"]
 results_ref: DISPATCH_LOG.md#A95             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-05T08:46:51.273644+00:00"
+updated_at: "2026-10-06T12:35:13.783385+00:00"
 ```
 
 # DISPATCH — A95 · System-One Move 2 "soft pre-flight" on `dispatch_worker`
@@ -98,3 +98,5 @@ code — branch + PR + self-merge.
 - [ ] Decision: ACTIVE (R1) or stop
 
 ## Closure (fill on completion)
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → blocked — depends on A94 (burn #9 → #10).
