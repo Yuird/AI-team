@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_73_NODE_ENV_FILE_GUARD
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A73 (PR #74)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:23:13.844770+00:00"
+evidence: ["tests/test_safe_worker_deploy_env_guard.py", "scripts/safe_worker_deploy.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T11:26:43.329484+00:00"
 ```
 
 # DISPATCH — AGENT_73_NODE_ENV_FILE_GUARD
@@ -38,7 +38,7 @@ chmod 600 by A67 — this extends the discipline to every node via the deploy pa
    reads `.env` directly; otherwise leave it to `safe_worker_deploy.py`.
 3. Test the pure guard (plain `pytest`, touched module only): mode 600 ⇒ passes; mode 644 ⇒ fails
    unless override set; nonexistent file ⇒ passes (gateway-agnostic). Windows path no-op.
-4. Docs: one line in `docs/MESH_SECURITY.md` storage/file-modes section.
+4. Docs: one line in `docs/backend/MESH_SECURITY.md` storage/file-modes section.
 
 ## Constraints / hard rules
 
@@ -69,6 +69,6 @@ and invoked from `_load_env` before `dotenv` load: POSIX mode with group/other r
 `RuntimeError` unless `AI_TEAM_ALLOW_LOOSE_ENV=1` (read from the operator's process env, never from
 the guarded file itself). Windows no-op; missing file no-op; mode 600 passes. Enforcement becomes
 live on the operator's next surfaced worker deploy (Horse) — surfaced, not done silently. Evidence:
-`tests/test_safe_worker_deploy_env_guard.py` (5 tests). `docs/MESH_SECURITY.md` storage section
+`tests/test_safe_worker_deploy_env_guard.py` (5 tests). `docs/backend/MESH_SECURITY.md` storage section
 updated.
 

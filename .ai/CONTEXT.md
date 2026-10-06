@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-08-10
+**Last Updated:** 2026-10-05
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -32,6 +32,13 @@ Current work:
 1. **A65 alert-delivery remediation** — final review found that P3 displays alerts in the Cost tab
    but does not deliver them through the existing browser-push seam stipulated by the packet. Reuse
    bounded `PushService` fanout at terminal task outcome; no new kill path or quota integration.
+2. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
+   `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
+   wake scorecard; Level 3; needs a read-only controller DB copy and `TYPESAFE_API_KEY` from the
+   operator). Then A95 (pre-flight). A96 (bounce) is blocked on A94's measured precision. The Governor
+   programme design (`.ai/context/GOVERNOR_OUTER_LOOP_V1.md` + `BOOTSTRAP_GOVERNOR_PROGRAMME_JOBS.md`,
+   bootstrap not yet run) now carries the S1 slots (§37) and three design conflicts (DC-1..3) awaiting
+   an owner ruling.
 
 
 > **Finding active jobs:** until the dispatch-state-kit is installed, read
@@ -46,7 +53,11 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | active — R0 merged + deployed 2026-10-02 (PR #182); A84 slice 1 deployed (PR #184); **Stage 8a SUBMITTED for review** (branch `feat/a82-stage8a`, PR open, NOT merged) | Unified durable turn queue on `main`. **8a (submitted):** born-managed sessions, unconditional protocol-0 fences, migration 43 (enroll all + fail pending legacy execution + drain predicate), OpenCode CLI retired (`backend_retired` 410), `carrier_required` with `MESH_ENABLED=false` (switch `_REFUSE_SESSION_TURNS_WITHOUT_MESH`, pending operator confirmation), coverage log + `/health` `turn_queue.coverage_ok` (details: authed `GET /api/turn-queue/coverage`), carries F2/F3/F4 (F5 moot), N-A, N-B, session badge, effects-failed surface — packet §15 "Stage 8a". **Deploy ONLY after R1** (operator-gated worker restarts on this host + Horse with `WORKER_MANAGED_TURNS=1` + psutil, `MESH_LOCAL_CARRIER_NODE_ID` in the controller env) — runbook + exact SQL below. **8b next:** delete legacy session execution. **Rules:** never roll back to pre-A82 main while protocol-1 rows exist; R0 image (`1749f47`) runs on schema 43. Rollback image `ai-team:pre-a82`, DB backup `~/ai-team-data/backups/mesh-pre-a82-20261002.db`. **Deferrals (s)–(v)** and all stage carries: packet §15/§16. |
+| **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
+| **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
+| **A96** | `AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE.md` | A94 + measured precision | blocked | Bounce a clearly-not-ready delivery instead of waking the Manager. |
+| **A97** | `AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX.md` | — | ready (Level 2) | Error-class keyword matching scans the agent's reply → wrong retry/pause class. Code fix. |
+| **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | active — R0 merged + deployed 2026-10-02 (PR #182); A84 slice 1 deployed (PR #184); **Stage 8a reviewed ACCEPT upstream; integrated onto current `main` 2026-10-06** (`Yuird/AI-team` issue #14 PR, merge-only; owner merges + deploys) | Unified durable turn queue on `main`. **8a:** born-managed sessions, unconditional protocol-0 fences, migration 43 (enroll all + fail pending legacy execution + drain predicate), OpenCode CLI retired (`backend_retired` 410), `carrier_required` with `MESH_ENABLED=false` (switch `_REFUSE_SESSION_TURNS_WITHOUT_MESH`, pending operator confirmation), coverage log + `/health` `turn_queue.coverage_ok` (details: authed `GET /api/turn-queue/coverage`), carries F2/F3/F4 (F5 moot), N-A, N-B, session badge, effects-failed surface — packet §15 "Stage 8a". **Deploy ONLY after R1** (operator-gated worker restarts on this host + Horse with `WORKER_MANAGED_TURNS=1` + psutil, `MESH_LOCAL_CARRIER_NODE_ID` in the controller env) — runbook + exact SQL below. **8b next:** delete legacy session execution. **Rules:** never roll back to pre-A82 main while protocol-1 rows exist; R0 image (`1749f47`) runs on schema 43. Rollback image `ai-team:pre-a82`, DB backup `~/ai-team-data/backups/mesh-pre-a82-20261002.db`. **Deferrals (s)–(v)** and all stage carries: packet §15/§16. |
 | **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
 | **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
@@ -55,7 +66,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | **A56** | `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md` | A52 ✅ | dispatched | M4: spec authoring + rubric-scored review + decomposer-as-task-DAG inside ONE Case. |
 | **A57** | `AGENT_57_M4_HYBRID_EXECUTOR_SPIKE.md` | A55 | dispatched — GATED | Go/no-go on SDK Dynamic Workflows vs hand-rolled DAG for intra-task parallel executor. |
 | **A58** | `AGENT_58_QUOTA_COORDINATOR_ACTIVATION.md` | A61 | **blocked** | Activating the quota coordinator — blocked until A61's real Claude adapter is independently reviewed (A63). |
-| **A60** | `AGENT_60_WARM_WORKER_IDLE_REAPER.md` | — | dispatched | Idle-reaper for warm workers (§7 deferral from A48); sequence after M3.4 flag is ON. |
 | **A61** | `AGENT_61_QUOTA_COORDINATOR_FINALIZATION.md` | — | built (direct commit `cbbaa10`, no PR) | Real Claude status-line adapter + quota windows API. **Needs A63 independent audit before treating as done.** |
 | **A62** | `AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN.md` | — | dispatched | Extend `/api/flags` to numeric/string knobs; land `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` as first real numeric case. |
 | **A63** | `AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT.md` | — | dispatched | Independent audit of A61's commit — re-derive every gap claim from the tree, not from the packet. |
@@ -68,6 +78,42 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-10-06 — Backlog burn-down: triage done; stateless cloud workers run GitHub issues on `Yuird/AI-team`.**
+All 27 open dispatch jobs were triaged against `main` @ `01446d7`. The record is
+`.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`, and the worker rules are `.claude/rules/cloud-burn.md`.
+- **Wave 1 (`burn:ready`):** #4 (A97 + A78 remainder: error and usage-limit classification) and
+  #5 (A65 budget-alert push).
+- **Queued:** #6 (A93) and #7 (A62).
+- **Blocked on owner decision #1** (A82 Stage 8a placement, R1 worker restarts, mesh migration
+  freeze): #8 (A71), #9 → #10 (A94 → A95), and #11 (A84).
+- **Other owner decisions:** #2 (A75 token model) and #3 (state rulings).
+- **Reconciled via `--set`:** A60, A68, A72, A73 and A74 → `done`; A24 → `dead`; evidence fixed for
+  A67 and A88.
+- **Burn PRs are never self-merged.** This overrides the root merge rule for burn work only.
+
+**2026-10-05 — System-One (TypeSafe Jev) decision layer specified and dispatched; tied into the Governor programme.**
+Owner decision after a 3-round analysis (30+ candidates scored on impact / fit / ground truth /
+doability / safety / non-Jev-alternative). The full reasoning record is in
+`docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` §2.
+- **Bet:** one thin S1 core (httpx client, pure "batteries", one `system_one_decisions` table,
+  fail-open, pinned `jev-1.13.0`) on the two existing choke points: `_render_wake_turn` (both wake
+  producers) and `dispatch_worker`.
+- **Moves:** A94 scorecard in the wake (advisory, A/B by case hash), then A95 soft pre-flight, then A96
+  bounce (blocked until replay precision ≥ 0.90 on ≥ 100 Manager verdicts).
+- **Baseline first:** a replay over a read-only DB copy measures AUROC against historical `review.*`
+  verdicts before anything ships.
+- **Governor programme:** the Governor files in `.ai/context/` were committed as the bootstrap's input
+  and annotated `[S1]`: §10.3 materiality, §15.3/§34 adversary trigger, §17 semantic guards, §26
+  metrics, §37 addendum. Three design conflicts need an owner ruling:
+  - **DC-1:** S1 checks vs "no inference while waiting";
+  - **DC-2:** calibrated vs deterministic guards;
+  - **DC-3:** no project-domain content to the Jev API until ruled.
+- **Rejected on purpose:** Jev for error classification (real bug → A97 code fix), model selection
+  (contract forbids), session hygiene, Telegram intent, tool gates, skill routing (only 3 skills).
+
+**2026-10-02 — A82 Stage 8a READY, MERGE HELD: PR #185 (`feat/a82-stage8a` @ `0b34905`) reviewed ACCEPT + CI green. DO NOT MERGE OR DEPLOY before R1.**
+Merging puts the cutover on `main`; any routine gateway redeploy would then make every session turn 503 until workers run managed turns. Order: (1) R1 — operator restarts `ai-team-worker` (this host, `kanebra-worker`) and the Horse worker after `git pull --ff-only && .venv/bin/pip install -c constraints.txt -e .` with `WORKER_MANAGED_TURNS=1`; set `MESH_LOCAL_CARRIER_NODE_ID=kanebra-worker` in the controller `.env`; (2) verify nodes advertise `managed_backends`; (3) pre-check SQL (packet runbook), backup, merge #185, rebuild controller (migration 43 ≈5 s on the Pi, fsync-bound); (4) verify schema 43, `/health` `turn_queue.coverage_ok=true`, real turns on Claude/Codex/opencode-server. Rollback: `ai-team:pre-a82`-era images run on schema 43; never pre-A82 main with protocol-1 rows. Operator defaults pending confirmation: no-carrier single-box refuses session turns (`_REFUSE_SESSION_TURNS_WITHOUT_MESH`); offline registered carrier queues (`_QUEUE_TURNS_FOR_OFFLINE_CARRIER`). OpenCode CLI retired (operator decision).
 
 **2026-10-02 — A82 Stage 8a (cutover) SUBMITTED — deploy runbook (do NOT deploy before R1).**
 Order: (1) **R1, operator-gated:** on this host and `Horse`: `.venv/bin/pip install -c constraints.txt -e .` (psutil), set `WORKER_MANAGED_TURNS=1` in the worker env, restart the worker (`kanebra-worker` PM2; Horse). (2) Controller `.env` (not `compose.yaml`): `MESH_LOCAL_CARRIER_NODE_ID=kanebra-worker` (= the local daemon's `WORKER_NODE_ID`). (3) Pre-checks on a read-only copy of `mesh.db` (below). (4) `sqlite3 mesh.db ".backup <backup>"`; keep the R0 image. (5) Merge 8a, rebuild, recreate gateway + task server (migration 43 applies at the first DB open, one txn: **~5 s on the Pi, fsync-bound** — on a live-DB copy the statements take ~0.14 s and the WAL COMMIT ~4.5 s, MeshDB open+migrate 5.6 s; the other process waits on the 15 s busy timeout). (6) Verify: `SELECT MAX(version) FROM schema_version` = 43; `SELECT COUNT(*) FROM sessions WHERE turn_queue_enrolled = 0` = 0; `curl http://127.0.0.1:9003/health` → `turn_queue.coverage_ok == true` (if false: `GET /api/turn-queue/coverage` with the dashboard token lists the uncovered (carrier, backend) pairs); no `event=managed_carrier_missing` in the gateway log; one web + one Telegram turn complete and notify.
@@ -97,7 +143,7 @@ so `/api/flags` toggles never reached it. Now: workers read controller state ove
 (`/control/runtime-flags`, `/control/cases/{id}/boot-reconcile`) and never open a mesh.db.
 Controller containers rebuilt on `684b506` (rollback image `ai-team:pre-a88`); route verified (401
 without token, 14 live flags with the worker token). **Not yet live on the worker** — it still runs
-old code until `pm2 restart ai-team-worker` (operator-gated). Then follow `docs/DATABASE_AUTHORITY.md`
+old code until `pm2 restart ai-team-worker` (operator-gated). Then follow `docs/backend/DATABASE_AUTHORITY.md`
 §6 steps 4-5 (verify no `mesh.db` fd, `controller_flags_refreshed` in logs; move the old file aside).
 Pre-retirement report: `scripts/db_authority_report.py` → exit 5 with the 3 classified rows (expected).
 Follow-up **A93**: worker `quota_windows.db` (120 MB) is never pruned; `coordinator_events` unbounded on
@@ -315,7 +361,7 @@ be flipped on/off with **no restart** (the whole point of the registry). The onl
 Deployment-shape-independent: works single-process or split. **Enablement/toggle:** via
 `/api/flags` or `scripts/ops_flag.sh` (controller registry). *(Superseded 2026-10-02 by A88: once the
 worker runs merged code it reads flags from the controller over `GET /control/runtime-flags`, never a
-local mesh.db — see `docs/DATABASE_AUTHORITY.md`. Until that worker restart it still reads its stale
+local mesh.db — see `docs/backend/DATABASE_AUTHORITY.md`. Until that worker restart it still reads its stale
 local copy.)* **§7 deferral (multi-worker):** with N
 claude workers each running a prewarmer, up to N minimal `haiku` turns could fire at a window boundary
 before any observes the new window. Bounded and cheap: warming is idempotent (skip-if-open is
@@ -335,7 +381,7 @@ An activation that opens nothing counts as a failure, and 3 consecutive failures
 rather than retrying: the anchored-window premise is checked every cycle, never assumed. Schedules
 off the provider's own `reset_at`, so ≤ ~5 activations/day, bounded again by
 `QUOTA_PREWARM_MAX_PER_DAY`/`MIN_INTERVAL_SEC`. **Deliberate spec deviation: no quiet hours** — the
-value only exists before the operator starts work (see `ENV_FEATURE_FLAGS.md` §D). Status rides on
+value only exists before the operator starts work (see `docs/backend/ENV_FEATURE_FLAGS.md` §D). Status rides on
 `GET /api/quota-windows` under `prewarm`.
 **(2) The quota-resume gate keyed on stale telemetry.** PR #97's restore check only consulted the
 429's own `resetsAt` when evidence was exactly `no_telemetry`. But this host's observer legitimately
@@ -469,7 +515,7 @@ migration. Executing A72 then A73 next (both provably non-breaking).
 
 **2026-08-05 — Mesh security review shipped (PR #72, `AGENT_67`).**
 Adversarial review of the mesh surfaces completed: private findings in `.security/` (git-ignored —
-never commit/publish), public threat-model in `docs/MESH_SECURITY.md` (hcom-structured). A **P0 was
+never commit/publish), public threat-model in `docs/backend/MESH_SECURITY.md` (hcom-structured). A **P0 was
 verified and fixed live**: the task-server `/files` staging upload used the client filename verbatim
 as a path segment, so a `../../` name escaped the staging root (arbitrary file write on the gateway
 host). PR #72 adds sanitize + containment; gateway restarted post-merge; worker untouched. `.env`
@@ -477,7 +523,7 @@ and `state/mesh.db` chmod `0600`. **Escalated to operator** (R2, not silently pa
 credentials replacing the single shared `WORKER_TOKEN` (self-reported node identity), claim/result
 identity binding, server-side dispatch bounds + rate limits, dashboard token out of served HTML.
 Until the credential model lands, treat `WORKER_TOKEN`/`DASHBOARD_TOKEN` as full-admin — see
-`docs/MESH_SECURITY.md`.
+`docs/backend/MESH_SECURITY.md`.
 
 **2026-08-05 — Close-session race gate merged (PR #70, `AGENT_70`).**
 The close-vs-turn race behind `task_ed5283f1` is fixed at the root: the worker now defers a
@@ -597,7 +643,7 @@ logs/events.ndjson                    system-wide event log
 
 **Config flags:** `MESH_ENABLED` (default `false`), `MESH_SHADOW_WRITE` (default `true`),
 `WORKER_TOKEN`, `MESH_TAILSCALE_IP`, `MESH_TASK_SERVER_PORT`. Feature flags →
-`docs/ENV_FEATURE_FLAGS.md`.
+`docs/backend/ENV_FEATURE_FLAGS.md`.
 
 ---
 
@@ -629,8 +675,8 @@ logs/events.ndjson                    system-wide event log
 | `src/worker/agent.py` | worker daemon (own process on worker nodes) |
 | `scripts/mcp_manager.py` | Manager MCP tool surface (`dispatch_worker`, `open_case`, etc.) |
 | `config/settings.py` | all config incl. `MeshConfig` |
-| `docs/ENV_FEATURE_FLAGS.md` | feature-flag reference |
-| `docs/CONTROL_CONTRACT.md` | M1 — event + inbound-command + backend + read-model contract |
+| `docs/backend/ENV_FEATURE_FLAGS.md` | feature-flag reference |
+| `docs/backend/CONTROL_CONTRACT.md` | M1 — event + inbound-command + backend + read-model contract |
 | `docs/harness/roles/manager.md` | Manager role behavior + dispatch-envelope template |
 | `docs/harness/roles/worker.md` | Worker role behavior |
 | `docs/Task_Harness_v0.7_AUTOMATION.md` | active harness automation spec (M0–M4) |

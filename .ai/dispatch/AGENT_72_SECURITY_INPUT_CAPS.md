@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_72_SECURITY_INPUT_CAPS
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A72 (PR #73)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:21:22.235181+00:00"
+evidence: ["tests/test_control_api_write.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T11:26:42.951385+00:00"
 ```
 
 # DISPATCH — AGENT_72_SECURITY_INPUT_CAPS
@@ -15,7 +15,7 @@ updated_at: "2026-08-05T10:21:22.235181+00:00"
 control-API write surface.
 **Status of this packet:** ready (authored, not executed)
 **Depends on:** — (P2-3 from A67; operator approved light server-side bounds in follow-up Q&A —
-see `AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL.md` closure and `docs/MESH_SECURITY.md`).
+see `AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL.md` closure and `docs/backend/MESH_SECURITY.md`).
 
 > **Why this packet exists.** P2-3 (unbounded `/api/instructions` `description`, `objective`, and
 > no size bounds on Manager/Case bodies) means one runaway or accidental oversized post can balloon
@@ -37,7 +37,7 @@ see `AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL.md` closure and `docs/MESH_SECUR
    (if ever) must be a separate, flag-gated, operator-confirmed change.
 3. Tests (plain `pytest`, touched modules only): oversized field ⇒ 422 from pydantic; a normal
    dispatch body still succeeds (no behavior change at realistic sizes).
-4. Docs: no public doc change needed beyond a `docs/MESH_SECURITY.md` "Limits by design" note that
+4. Docs: no public doc change needed beyond a `docs/backend/MESH_SECURITY.md` "Limits by design" note that
    the control-API write surface is bounded.
 
 ## Constraints / hard rules
@@ -67,6 +67,6 @@ see `AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL.md` closure and `docs/MESH_SECUR
 `CaseOpenBody.objective`/`completion_criteria`). Oversized ⇒ pydantic 422, verified **live** on the
 restarted gateway with a 262145-char description probe. Under-cap dispatch flows untouched (existing
 suites green). No rate limit shipped, per plan (Manager parallel-dispatch risk). Evidence:
-`tests/test_control_api_write.py` (3 new tests) + live 422 probe. `docs/MESH_SECURITY.md` note
+`tests/test_control_api_write.py` (3 new tests) + live 422 probe. `docs/backend/MESH_SECURITY.md` note
 updated in the A73 commit batch.
 
