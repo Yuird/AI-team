@@ -27,27 +27,26 @@ For every burn issue (sub-issues of #13) and every open or recently merged PR th
 
 - **PR merged:**
   1. Confirm the issue closed. If it did not, close it as `completed`.
-  2. Add the PR to the **deploy batch** if the issue carries `deploy:*` labels.
-  3. Add the PR to the **upstream-sync batch** (see step 4).
-  4. Promote dependents per #13: a `gate:prerequisite` issue whose "Blocked by" issues are now
+  2. Add the PR to the **ship batch** (see step 4).
+  3. Promote dependents per #13: a `gate:prerequisite` issue whose "Blocked by" issues are now
      all closed becomes `burn:ready`, and its `gate:prerequisite` label is removed.
 - **Worker stopped** (an issue comment starting with `BURN-STOP:`): label the issue `burn:decision`, remove `burn:in-progress`, and list it under "Needs you".
 - **PR closed without merge:** reset the issue to `burn:ready` (remove `burn:in-progress`), and
   comment with the reason, quoting the owner if the owner said why.
-- **Owner ruling on a `burn:decision` issue** (a comment from `Yuird` on #1, #2 or #3):
-  - On #1, record the ruling in #8, #9 and #11: where Stage 8a lands, the assigned migration
-    numbers, and the restart window.
-  - Remove `gate:owner-ruling` from those issues. They become `burn:ready` only when **every**
-    gate is gone. `gate:owner-approval` stays until the owner approves that issue's plan on the
-    issue itself.
-  - Rulings on #2 and #3 change dispatch records. Apply them in **one docs-only PR** using
-    `.venv/bin/python scripts/dispatch/dispatch_state.py --set …`. Never merge it.
-  - Close the decision issue once every part of it is ruled.
-- **Owner command comments on #13:**
-  - `/deployed`: the owner deployed everything in the deploy batch. Clear it.
-  - `/synced`: the owner pushed the sync batch upstream to `nydiokar/AI-team`. Clear it.
-  - `/approve #N`: the owner approved a Level-3 plan. Remove `gate:owner-approval` from #N.
-  - `/pause` and `/resume`: stop or restart dispatching. Reconciliation and reporting continue
+- **Owner ruling on a `burn:decision` issue.** An owner comment of `approve all`, or
+  `approve` followed by row names, means: apply the issue's recommended actions for those rows.
+  - Dispatch-record changes go in **one docs-only PR** made with
+    `.venv/bin/python scripts/dispatch/dispatch_state.py --set …`. That PR goes through the
+    reviewer, and the owner merges it.
+  - Label changes and issue relinking you apply directly.
+  - Close the decision issue once everything in it is applied or the PR is merged.
+- **Owner commands on #13:**
+  - `/deployed`: the owner synced the ship batch to `nydiokar/AI-team` and deployed it. Clear
+    the batch.
+  - `/approve #N`: remove `gate:owner-approval` from #N.
+  - `/approve all`: remove it from every current and future Level-3 issue. Record this standing
+    approval in the status comment.
+  - `/pause` and `/resume`: stop or restart dispatching. Reconciling and reporting continue
     while paused.
 
 ### 2. Review gate: one adversarial reviewer per PR head
@@ -89,12 +88,16 @@ using these sections:
 1. **Needs you:** `burn:decision` issues, `gate:owner-approval` plans waiting for your
    `/approve #N`, PRs in "Ready for you to merge", and escalations.
 2. **In flight:** each worker or reviewer, with its issue, PR and age.
-3. **Deploy batch:** merged PRs with their `deploy:*` labels, worker restarts grouped
-   separately, plus the standing pending restarts listed in #1. Close with: "Deploy at a
-   quiet time, then comment `/deployed`."
-4. **Upstream-sync batch:** merged PRs not yet in `nydiokar/AI-team`. Close with: "After
-   validation, sync upstream, then comment `/synced`."
-5. **Next up:** what will be dispatched when a slot frees.
+3. **Ship batch:** the merged PRs not yet shipped. Write it as an ordered runbook built from
+   their `deploy:*` labels and the PRs' operator notes:
+   1. Sync to `nydiokar/AI-team`.
+   2. **Worker restart** (one batched restart), if any PR needs it.
+   3. **Gateway redeploy.**
+
+   Ordering rule: if the batch contains the A82 Stage 8a integration, the worker restart with
+   `WORKER_MANAGED_TURNS=1` must happen **before** the gateway redeploy, and the post-checks from
+   the A82 packet runbook are listed. End with: "Ship at a quiet time, then comment `/deployed`."
+4. **Next up:** what will be dispatched when a slot frees.
 
 Archive worker and reviewer sessions whose PR is merged or closed (`archive_session`).
 The owner merging the PR is the acknowledgement that the session is finished.
