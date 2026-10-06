@@ -74,7 +74,9 @@ Fix loop:
 - Pick `burn:ready` issues in #13 order: lowest milestone first, then the order of the #13 table.
 - For each pick:
   1. Start a worker with `create_session`. Prompt: `Work issue #N autonomously to proven
-     completion.` Source: this repo, default branch.
+     completion.` Set `source_url` to `https://github.com/Yuird/AI-team` and use the default branch.
+     Routine sessions have no repo attached, so a missing `source_url` leaves the worker without
+     code. Pass the same `source_url` to reviewer sessions.
   2. Label the issue `burn:in-progress` and remove `burn:ready`.
   3. Comment the session id on the issue.
 - **Stall rule.** A `burn:in-progress` issue with no PR and no session activity for more than
