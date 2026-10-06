@@ -66,6 +66,15 @@ the audit reads as one non-existent path, to a yaml list.
 Operator-only remainders share **one** worker restart (#1, item 3): A82 R1, A88, A89, A91, PR #172
 prewarm fix, and any merged worker-side burn PR (#4, #6, #7).
 
-## Wave policy
-At most 2 `burn:ready` issues at a time. When a wave PR merges, the governor promotes the next
-unblocked issue, in this order: #6, then #7, then whichever of #8, #9 or #11 the #1 ruling unblocks.
+## Roadmap and wave policy
+The live roadmap is the tracker issue **#13**. It has:
+- wave milestones W0–W4 and native "blocked by" links;
+- the label taxonomy: `burn:` status, `gate:` blocker, `area:`, `track:` cohort, `type:`, `level:`
+  and `deploy:` after-merge step.
+
+The order is:
+- **W1:** #4 and #5.
+- **#7:** independent of everything, so it is safe to pull into W1.
+- **#6:** after #4.
+- **W3:** after the owner answers #1.
+- **#10:** after #9.
