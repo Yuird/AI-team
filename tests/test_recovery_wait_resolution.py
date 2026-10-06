@@ -190,3 +190,42 @@ def test_recover_completed_session_emits_task_finished(tmp_path, monkeypatch):
     # The durable fact landed -> the dangling wait now resolves (Manager woken).
     assert [e["entity_id"] for e in _finished(db, case_id)] == ["task_rec"]
     assert db.compute_continuation_tick(case_id)["satisfied"] is True
+
+
+# --- A82 Stage 8a cross-path: migration 43 terminalises without the event ------
+
+def test_backfill_resolves_wait_on_row_failed_by_migration_43(tmp_path):
+    # Migration 43 fails every PENDING protocol-0 session execution row in SQL
+    # (no `task.finished`). A Manager awaiting such a worker turn must still be
+    # woken: the task-truth backfill sees the row as failed.
+    import sqlite3
+
+    path = str(tmp_path / "mesh.db")
+    db = MeshDB(path)
+    case_id = db.open_case("obj", "mgr-1", role="manager")
+    now = "2026-10-06T00:00:00+00:00"
+    from src.core.interfaces import Session, SessionStatus
+    db.upsert_session(Session(session_id="s-w", backend="claude", repo_path="/tmp/repo",
+                              status=SessionStatus.IDLE, created_at=now, updated_at=now,
+                              machine_id="worker-a"))
+    db._conn().execute(
+        "INSERT INTO mesh_tasks (id, session_id, machine_id, backend, action, payload, prompt, "
+        "status, created_at, updated_at) VALUES ('task_legacy', 's-w', 'worker-a', 'claude', "
+        "'resume_session', '{}', 'old', 'pending', ?, ?)", (now, now),
+    )
+    db._conn().commit()
+    _arm_group(db, case_id, "g43", ["task_legacy"])
+    db.close()
+    conn = sqlite3.connect(path)  # look like schema 42 again (pre-cutover)
+    conn.execute("DELETE FROM schema_version WHERE version >= 43")
+    conn.commit()
+    conn.close()
+
+    db = MeshDB(path)  # applies 43
+    assert db.get_task("task_legacy")["status"] == "failed"
+    assert _finished(db, case_id) == []
+    assert db.compute_continuation_tick(case_id)["satisfied"] is False
+
+    assert db.backfill_missing_task_finished(case_id) == ["task_legacy"]
+    assert json.loads(_finished(db, case_id)[0]["payload_json"])["outcome"] == "failed"
+    assert db.compute_continuation_tick(case_id)["satisfied"] is True
