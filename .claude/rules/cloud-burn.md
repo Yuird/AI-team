@@ -38,10 +38,10 @@ this file when the burn-down ends.
   implementation PR, and leave dispatch state unchanged.
 
 ## Standing constraints found in triage (2026-10-06)
-- **Mesh migration freeze.** Add no new migration to `_get_migrations()` in
-  `src/control/db.py` unless the issue names an assigned number. Migration 43 is reserved
-  by the held A82 Stage 8a branch (`nydiokar/AI-team#185`, not in this repo). A gap or
-  duplicate number silently skips a migration (see #1).
+- **Mesh migrations stay contiguous.** Migration 43 belongs to the A82 Stage 8a integration
+  (#14). Any other PR that adds a migration to `_get_migrations()` in `src/control/db.py` uses
+  `max(main) + 1` and **renumbers on rebase** if `main` moved, before review. A gap or duplicate
+  number silently skips a migration on an upgraded DB. The reviewer checks for this.
 - **Level-3 work.** A `burn:ready` label is the operator's approval for that issue's
   stated scope only. If you need anything beyond that scope, stop and report.
 - **Shallow clone, upstream refs.** If `git rev-parse --is-shallow-repository` prints
