@@ -60,17 +60,14 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
 | **A96** | `AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE.md` | A94 + measured precision | blocked | Bounce a clearly-not-ready delivery instead of waking the Manager. |
 | **A97** | `AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX.md` | — | ready (Level 2) | Error-class keyword matching scans the agent's reply → wrong retry/pause class. Code fix. |
-| **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
 | **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
 | **A55** | `AGENT_55_M34_JOB3_CRASH_RESPAWN.md` | A54 | dispatched | Respawn a role-full Manager on a dead-session Case. Closes "survive a process restart." |
 | **A56** | `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md` | A52 ✅ | dispatched | M4: spec authoring + rubric-scored review + decomposer-as-task-DAG inside ONE Case. |
 | **A57** | `AGENT_57_M4_HYBRID_EXECUTOR_SPIKE.md` | A55 | dispatched — GATED | Go/no-go on SDK Dynamic Workflows vs hand-rolled DAG for intra-task parallel executor. |
-| **A58** | `AGENT_58_QUOTA_COORDINATOR_ACTIVATION.md` | A61 | **blocked** | Activating the quota coordinator — blocked until A61's real Claude adapter is independently reviewed (A63). |
 | **A61** | `AGENT_61_QUOTA_COORDINATOR_FINALIZATION.md` | — | built (direct commit `cbbaa10`, no PR) | Real Claude status-line adapter + quota windows API. **Needs A63 independent audit before treating as done.** |
 | **A62** | `AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN.md` | — | dispatched | Extend `/api/flags` to numeric/string knobs; land `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` as first real numeric case. |
-| **A63** | `AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT.md` | — | dispatched | Independent audit of A61's commit — re-derive every gap claim from the tree, not from the packet. |
 
 **Operator-gated validations still pending:**
 - Job 1 live activation: `CASE_CONTINUATION_ENABLED=1` + gateway restart (runbook in `manager.md`).

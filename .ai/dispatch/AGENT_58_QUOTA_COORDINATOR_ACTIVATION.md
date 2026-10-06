@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_58_QUOTA_COORDINATOR_ACTIVATION
 created_at: "2026-07-30T03:07:45+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: blocked              # ready | active | blocked | done | dead
+status: dead              # ready | active | blocked | done | dead
 owner: ""
 depends_on: AGENT_61_QUOTA_COORDINATOR_FINALIZATION
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:21:31.200176+00:00"
+updated_at: "2026-10-06T12:35:12.349207+00:00"
 ```
 
 # DISPATCH — A58 · Quota window coordinator: activation + Phase-2 (act on windows)
@@ -80,3 +80,5 @@ Turn/cost governor (A53); wake-dispatch (M3.4/A52).
 
 ## Closure (fill on completion)
 _(verdict + evidence)_
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → dead — superseded: coordinator is live and acting (prewarmer, Case quota-resume).

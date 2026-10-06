@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_90_BACKEND_LOCALITY_ABSTRACTION
 created_at: "2026-09-26T17:25:14.000000+00:00"
-status: ready
+status: dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A90
 evidence: []
-updated_at: "2026-09-26T17:25:14.000000+00:00"
+updated_at: "2026-10-06T12:35:12.908354+00:00"
 ```
 
 # DISPATCH — A90 · Backend interface locality abstraction (architectural refactor)
@@ -206,3 +206,5 @@ A89 (PR #171, `bdb804b`) added two artefacts you will delete or supersede:
 The worker-side `cancel_turn` handler is correct and should be **kept** — it is the remote
 delivery mechanism regardless of which layer triggers it. What moves is who decides to trigger it:
 currently the orchestrator decides; after this job the backend decides.
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → dead — superseded: the A82 managed path owns locality and 8b deletes the seams A90 would refactor.

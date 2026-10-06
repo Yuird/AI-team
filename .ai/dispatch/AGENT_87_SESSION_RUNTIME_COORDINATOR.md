@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_87_SESSION_RUNTIME_COORDINATOR
 created_at: "2026-09-24T18:00:20+00:00"
-status: active
+status: dead
 owner: mgr-a2a819ff
 depends_on: []
 results_ref: DISPATCH_LOG.md#A87
 evidence: []
-updated_at: "2026-09-25T08:26:14.805928+00:00"
+updated_at: "2026-10-06T12:35:12.735143+00:00"
 ```
 
 # DISPATCH — A87 · Manager review and integration control for session reliability and runtime delivery
@@ -188,3 +188,5 @@ retires the premise of **BOTH** container-track jobs, not just A86 —
 ## Closure (fill on completion)
 
 State reviewed job verdicts, unresolved evidence, and why any release/deploy action remains operator-gated.
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → dead — superseded by per-PR adversarial review since 2026-09-25; live obligations carried by #11 (A84) and the A86 dependency.
