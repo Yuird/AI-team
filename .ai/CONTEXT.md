@@ -29,10 +29,7 @@ instead and leave a one-liner here.
 
 Current work:
 
-1. **A65 alert-delivery remediation** — final review found that P3 displays alerts in the Cost tab
-   but does not deliver them through the existing browser-push seam stipulated by the packet. Reuse
-   bounded `PushService` fanout at terminal task outcome; no new kill path or quota integration.
-2. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
+1. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
    `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
    wake scorecard; Level 3; needs a read-only controller DB copy and `TYPESAFE_API_KEY` from the
    operator). Then A95 (pre-flight). A96 (bounce) is blocked on A94's measured precision. The Governor
@@ -59,7 +56,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | **A97** | `AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX.md` | — | ready (Level 2) | Error-class keyword matching scans the agent's reply → wrong retry/pause class. Code fix. |
 | **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | active — **R0 merged + deployed 2026-10-02** (PR #182, flags OFF, nothing enrolled); Stage 8 next | Unified durable turn queue now on `main`. **Stage 8 prerequisites (open):** (1) **A84-scope completion consumer** — managed completions skip notify/telemetry/enrichment/session summary (final-review F1; Telegram users would never get the reply) — must land before ANY session is enrolled; (2) R1 operator-gated worker restarts on this host + Horse with `WORKER_MANAGED_TURNS=1`, psutil installed (`.venv/bin/pip install -c constraints.txt -e .`), `MESH_LOCAL_CARRIER_NODE_ID` set in the controller env (not in `compose.yaml`); (3) Stage 8a: born-managed sessions, migration enrolling existing sessions + protocol-0 drain predicate, OpenCode CLI retired (operator decision 2026-10-02), unenroll fixes (F2 hold/pause, F3 retry-pause/producer links), Telegram stop off-loop (F4), task-server enrollment cache TTL (F5), Codex close/forget N-A, refused-invoke close row N-B; (4) 8b: delete legacy session execution. **Rules:** never roll back to pre-A82 main while protocol-1 rows exist (main's `get_pending_tasks` has no protocol filter → double execution); rollback image `ai-team:pre-a82`, DB backup `~/ai-team-data/backups/mesh-pre-a82-20261002.db`. **Deferrals (s)–(v)** and all stage carries: packet §15/§16. Plan: packet + Stage 8 plan in session notes. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
-| **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
 | **A55** | `AGENT_55_M34_JOB3_CRASH_RESPAWN.md` | A54 | dispatched | Respawn a role-full Manager on a dead-session Case. Closes "survive a process restart." |
 | **A56** | `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md` | A52 ✅ | dispatched | M4: spec authoring + rubric-scored review + decomposer-as-task-DAG inside ONE Case. |
