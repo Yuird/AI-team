@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_68_PEER_MESSAGING_TRANSPORT_INVESTIGATION
 created_at: "2026-08-03T18:17:00.871619+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T18:17:00.871643+00:00"
+evidence: ["docs/PEER_MESSAGING_INVESTIGATION.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T11:26:44.475968+00:00"
 ```
 
 # DISPATCH — A68 · Peer messaging transport — holistic investigation (NO implementation)
@@ -138,5 +138,9 @@ separately.
 - [ ] Recommendation written; go/no-go framed as operator decision
 - [ ] `docs/PEER_MESSAGING_INVESTIGATION.md` on `main`; zero src diff
 
-## Closure (fill on completion)
-(fill when executed)
+## Closure (reconciled 2026-10-06 — burn-down triage)
+The study exists on `main` as `docs/PEER_MESSAGING_INVESTIGATION.md` (dated 2026-08-27, indexed in
+`docs/INDEX.md` as the A68 result): substrate inventory, Options A–D including a "do not build" option,
+recommendation B, a per-option hard-constraints checklist, and zero `src/` diff. Status set `done`.
+Known gaps in the study (not reopened): no S/M/L effort sizing and no explicit A65/A67 cross-links.
+**The build go/no-go remains an operator fork**; no implementation is dispatched.

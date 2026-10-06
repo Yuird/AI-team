@@ -66,7 +66,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | **A56** | `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md` | A52 ✅ | dispatched | M4: spec authoring + rubric-scored review + decomposer-as-task-DAG inside ONE Case. |
 | **A57** | `AGENT_57_M4_HYBRID_EXECUTOR_SPIKE.md` | A55 | dispatched — GATED | Go/no-go on SDK Dynamic Workflows vs hand-rolled DAG for intra-task parallel executor. |
 | **A58** | `AGENT_58_QUOTA_COORDINATOR_ACTIVATION.md` | A61 | **blocked** | Activating the quota coordinator — blocked until A61's real Claude adapter is independently reviewed (A63). |
-| **A60** | `AGENT_60_WARM_WORKER_IDLE_REAPER.md` | — | dispatched | Idle-reaper for warm workers (§7 deferral from A48); sequence after M3.4 flag is ON. |
 | **A61** | `AGENT_61_QUOTA_COORDINATOR_FINALIZATION.md` | — | built (direct commit `cbbaa10`, no PR) | Real Claude status-line adapter + quota windows API. **Needs A63 independent audit before treating as done.** |
 | **A62** | `AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN.md` | — | dispatched | Extend `/api/flags` to numeric/string knobs; land `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` as first real numeric case. |
 | **A63** | `AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT.md` | — | dispatched | Independent audit of A61's commit — re-derive every gap claim from the tree, not from the packet. |
@@ -79,6 +78,19 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-10-06 — Backlog burn-down: triage done; stateless cloud workers run GitHub issues on `Yuird/AI-team`.**
+All 27 open dispatch jobs were triaged against `main` @ `01446d7`. The record is
+`.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`, and the worker rules are `.claude/rules/cloud-burn.md`.
+- **Wave 1 (`burn:ready`):** #4 (A97 + A78 remainder: error and usage-limit classification) and
+  #5 (A65 budget-alert push).
+- **Queued:** #6 (A93) and #7 (A62).
+- **Blocked on owner decision #1** (A82 Stage 8a placement, R1 worker restarts, mesh migration
+  freeze): #8 (A71), #9 → #10 (A94 → A95), and #11 (A84).
+- **Other owner decisions:** #2 (A75 token model) and #3 (state rulings).
+- **Reconciled via `--set`:** A60, A68, A72, A73 and A74 → `done`; A24 → `dead`; evidence fixed for
+  A67 and A88.
+- **Burn PRs are never self-merged.** This overrides the root merge rule for burn work only.
 
 **2026-10-05 — System-One (TypeSafe Jev) decision layer specified and dispatched; tied into the Governor programme.**
 Owner decision after a 3-round analysis (30+ candidates scored on impact / fit / ground truth /

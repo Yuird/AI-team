@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_72_SECURITY_INPUT_CAPS
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A72 (PR #73)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:21:22.235181+00:00"
+evidence: ["tests/test_control_api_write.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T11:26:42.951385+00:00"
 ```
 
 # DISPATCH — AGENT_72_SECURITY_INPUT_CAPS

@@ -5,8 +5,8 @@ status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A67 (verdict prose)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: .security/mesh_findings_2026-08.md                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T09:26:48.554368+00:00"
+evidence: ["docs/backend/MESH_SECURITY.md", "tests/test_task_server_upload_safety.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T11:26:43.828957+00:00"
 ```
 
 # DISPATCH — A67 · Mesh/relay/worker security review + threat-model doc
