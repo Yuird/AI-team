@@ -43,9 +43,10 @@ this file when the burn-down ends.
   duplicate number silently skips a migration (see #1).
 - **Level-3 work.** A `burn:ready` label is the operator's approval for that issue's
   stated scope only. If you need anything beyond that scope, stop and report.
-- **Shallow clone, upstream refs.** Local history starts at 2026-09-18. To see older commits,
-  use the GitHub API (`mcp__github__get_commit`). PR numbers in packets and CONTEXT before
-  2026-10-06 refer to upstream `nydiokar/AI-team`, not to this repo's numbering.
+- **Shallow clone, upstream refs.** If `git rev-parse --is-shallow-repository` prints
+  `true`, run `git fetch --unshallow origin` first (it takes about 2 s). PR numbers in packets
+  and CONTEXT before 2026-10-06 refer to upstream `nydiokar/AI-team`, not to this repo's
+  numbering.
 - **Line numbers in dispatch packets are often stale** (for example, the control-API router
   split `00efbad`). Resolve symbols; never trust a cited line number.
 
