@@ -34,7 +34,8 @@ this file when the burn-down ends.
   checks with `cd web && pnpm typecheck && pnpm test` only when `web/` changed.
 - **Stop, don't force.** If evidence invalidates the issue's premise (already fixed,
   superseded, wrong seam, needs an owner decision), stop. Comment on the issue with the
-  evidence, open no implementation PR, and leave dispatch state unchanged.
+  evidence, starting the comment with `BURN-STOP:` so the governor can route it. Open no
+  implementation PR, and leave dispatch state unchanged.
 
 ## Standing constraints found in triage (2026-10-06)
 - **Mesh migration freeze.** Add no new migration to `_get_migrations()` in
@@ -82,7 +83,9 @@ make CI or a reviewer reject it.
 ## Coordination labels
 The roadmap, label legend and dispatch order live in the tracker issue **#13**.
 Milestones W0–W4 are the waves. Labels are owner/governor-managed, so workers read them
-and never change them.
+and never change them. A scheduled governor (`.ai/context/BURN_GOVERNOR.md`) dispatches you.
+An adversarial reviewer (`.ai/context/BURN_REVIEWER.md`) reviews your PR. If you are asked to
+address a review, push fixes to the same PR branch and re-run the completion protocol.
 - **`burn:` status.** Work only `burn:ready`. For any other status, stop and report the
   label. A `gate:owner-*` label means the owner must act first.
 - **`deploy:` labels.** These name the operator step needed after merge. List that step in
