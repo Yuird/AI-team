@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_91_OPENCODE_BACKEND_PARITY
 created_at: "2026-09-27T11:43:24.753631+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active               # ready | active | blocked | done | dead
+status: blocked               # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A91
 evidence: []
-updated_at: "2026-09-27T14:31:42.670426+00:00"
+updated_at: "2026-10-06T12:35:13.228131+00:00"
 ```
 
 # DISPATCH — A91 · OpenCode backend parity and reliability
@@ -84,3 +84,5 @@ OpenCode API references: [Server API](https://opencode.ai/docs/server/) document
 - Direct owning-host execution, output, activity labels, usage/tool sink events, abort, and native resume are verified. **Still required before `done`:** after the operator restarts PM2 worker, verify forwarded activity in the UI and persisted telemetry. The current worker process still has its pre-merge module loaded.
 - No user-facing universal API, worker protocol, DB schema, or config values changed. Any deferred service-boundary item has a concrete note here before closure.
 - Update `DISPATCH_LOG.md` A91 closure/status and set YAML `status: done` only with evidence paths that exist. Leave deployment/worker restart operator-gated.
+
+**Reconciled 2026-10-06 (owner ruling #3, 2026-10-06; burn-down triage `.ai/context/BURN_DOWN_TRIAGE_2026-10-06.md`):** status → blocked — code merged (`0c88c3a`); only the live UI/telemetry check after the owner's next ship batch remains.
