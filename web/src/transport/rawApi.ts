@@ -52,6 +52,11 @@ export interface RawSessionView {
    *  session (core.view_models.SessionTurnQueueState). null/absent ⇒ not
    *  enrolled (legacy status semantics apply). */
   turn_queue?: RawSessionTurnQueue | null;
+  /** [quota-resume] Role of this session in its affiliated Case, or null for
+   *  standalone sessions. Values: "manager" | "worker" | null. */
+  case_role?: string | null;
+  /** [quota-resume] Case ID this session is currently affiliated with, or null. */
+  current_case_id?: string | null;
 }
 
 // [A82 Stage 6] Queue overlay: waiting count + the ledger's active slot holder.
@@ -67,7 +72,7 @@ export interface RawSessionTurnQueue {
 // [A83] Shape of SessionReason.to_dict(): {kind, confidence, detail}.
 export interface RawSessionReason {
   /** Vocabulary (spec §4): paused_quota | paused_retry | waiting_workers |
-   *  waiting_job | open_case_idle | idle | node_offline. */
+   *  waiting_job | open_case_idle | work_in_flight | idle | node_offline. */
   kind: string;
   /** "high" | "medium" — medium marks absence-based inferences. */
   confidence: string;

@@ -559,16 +559,14 @@ class _UnsupportedBackend:
 
 
 def test_INT10b_worker_advertises_only_backends_with_a_managed_path(tmp_path):
-    from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend
+    from src.backends.opencode import OpenCodeServerBackend
     from src.core.interfaces import CodingBackend
 
     # [A82 step 4a] Codex (test_codex_managed_turns) and [step 4b]
     # OpenCodeServerBackend (test_opencode_managed_turns) implement the contract;
-    # only the CLI OpenCode keeps the interface default.
+    # a backend that keeps the interface default is not advertised. (The CLI
+    # OpenCode backend example was retired — A102 S1-OpenCode / R3.)
     assert OpenCodeServerBackend().supports_managed_turns() is True
-    for cls in (OpenCodeBackend,):
-        assert cls.supports_managed_turns is CodingBackend.supports_managed_turns
-        assert cls.run_managed_turn is CodingBackend.run_managed_turn
     reg = _RecordingHTTP()
     w = _worker(tmp_path, reg)
     w.cfg.backends = ["claude", "codex"]
@@ -604,18 +602,16 @@ def real_claude(monkeypatch):
     sess = _start_fake_session(fake)
     proactive: List[Any] = []
     sess._on_proactive = lambda key, outcome: proactive.append(outcome)
-    calls = {"send": 0, "send_managed": 0}
-    real_send, real_managed = sess.send, sess.send_managed
+    # [A102 S1] One send now: the managed and legacy paths collapsed into the
+    # single echo-correlated _SDKSession.send. There is no distinct send_managed.
+    calls = {"send": 0, "run_managed_turn": 0}
+    real_send = sess.send
 
     def _send(*a, **k):
         calls["send"] += 1
         return real_send(*a, **k)
 
-    def _send_managed(*a, **k):
-        calls["send_managed"] += 1
-        return real_managed(*a, **k)
-
-    sess.send, sess.send_managed = _send, _send_managed
+    sess.send = _send
     monkeypatch.setattr(ClaudeSDKClientDriver, "_get_or_create", lambda self, *a, **k: sess)
 
     class _Pool(dict):
@@ -633,7 +629,6 @@ def real_claude(monkeypatch):
         calls["run_managed_turn"] += 1
         return real_rmt(*a, **k)
 
-    calls["run_managed_turn"] = 0
     backend.run_managed_turn = _rmt
     yield SimpleNamespace(backend=backend, fake=fake, sess=sess, calls=calls, proactive=proactive)
     sess.close()
@@ -672,7 +667,7 @@ def test_INT11_managed_row_reaches_send_managed_on_real_driver(db, tmp_path, rea
     _seed_session_turn(db, "t-11", "sess-11", "managed prompt")
     _run_one(w, "t-11")
 
-    assert real_claude.calls == {"send": 0, "send_managed": 1, "run_managed_turn": 1}
+    assert real_claude.calls == {"send": 1, "run_managed_turn": 1}
     assert real_claude.fake.queries_sent == ["managed prompt"]
     row = _row(db, "t-11")
     assert row["status"] == "completed"
@@ -711,7 +706,7 @@ def test_INT12_foreign_turn_result_not_served_managed_turn_gets_its_own(db, tmp_
                      _assistant("mine", sid="n-12"), _result("MY REPLY", sid="n-12"))
     th.join(5)
     assert not th.is_alive()
-    assert real_claude.calls == {"send": 0, "send_managed": 1, "run_managed_turn": 1}
+    assert real_claude.calls == {"send": 1, "run_managed_turn": 1}
     posted = [c[1] for c in http.calls if c[0] == "POST"]
     assert "/tasks/t-12/enter-recovery" not in posted
     row = _row(db, "t-12")
@@ -724,7 +719,12 @@ def test_INT12_foreign_turn_result_not_served_managed_turn_gets_its_own(db, tmp_
     assert r.status_code == 409
 
 
-def test_INT13_legacy_row_with_flag_on_still_uses_legacy_send(db, tmp_path, real_claude):
+def test_INT13_pre_cutover_legacy_row_never_runs_on_a_managed_worker(db, tmp_path, real_claude):
+    """[A82 Stage 8a] Converted from ``..._still_uses_legacy_send``: a protocol-0
+    session EXECUTION row left pending from before the cutover is refused at
+    the claim — failed, terminal, never re-offered — and NO send of any kind
+    reaches the backend (no legacy send, no managed send)."""
+    from tests.stage8a_legacy import enqueue_pre_cutover
     from tests.test_turn_queue_sdk_ownership import _result
 
     real_claude.fake.replies["legacy prompt"] = [_result("legacy bare reply")]
@@ -733,19 +733,19 @@ def test_INT13_legacy_row_with_flag_on_still_uses_legacy_send(db, tmp_path, real
     w._backends = {"claude": real_claude.backend}
     db.upsert_session(Session(session_id="sess-13", backend="claude", repo_path="",
                               status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id=NODE))
-    db.enqueue_task("t-13", "sess-13", NODE, "claude", "resume_session", {
+    enqueue_pre_cutover(db, "t-13", "sess-13", NODE, "claude", "resume_session", {
         "prompt": "legacy prompt",
         "session": {"session_id": "sess-13", "backend": "claude", "repo_path": "",
                     "backend_session_id": "native-prev"},
     })
     _run_one(w, "t-13")
 
-    assert real_claude.calls == {"send": 1, "send_managed": 0, "run_managed_turn": 0}
+    assert real_claude.calls == {"send": 0, "run_managed_turn": 0}
     posted = [c[1] for c in http.calls if c[0] == "POST"]
-    assert "/tasks/t-13/claim" in posted and "/tasks/t-13/result" in posted
-    assert not any("managed" in p or "recovery" in p for p in posted[1:])
-    assert _row(db, "t-13")["status"] == "completed"
-    assert json.loads(_row(db, "t-13")["result"])["output"] == "legacy bare reply"
+    assert "/tasks/t-13/claim" in posted and "/tasks/t-13/result" not in posted
+    row = _row(db, "t-13")
+    assert row["status"] == "failed" and "legacy_execution_refused" in str(row["error"])
+    assert asyncio.run(w._fetch_pending()) == []  # never re-offered
 
 
 # --------------------------------------------------------------------------- #

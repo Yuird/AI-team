@@ -100,6 +100,10 @@ export interface Session {
   reason: SessionReason | null;
   /** [A82 Stage 6] Managed turn-queue overlay (enrolled sessions only). */
   turnQueue: SessionTurnQueue | null;
+  /** [quota-resume] Role in the affiliated Case: "manager" | "worker" | null. */
+  caseRole: string | null;
+  /** [quota-resume] Case ID this session is currently affiliated with, or null. */
+  currentCaseId: string | null;
 }
 
 /** [A82 Stage 6] Ledger truth for an enrolled session's queue. */
@@ -118,6 +122,7 @@ export type SessionReasonKind =
   | "waiting_workers"
   | "waiting_job"
   | "open_case_idle"
+  | "work_in_flight"
   | "idle"
   | "node_offline";
 

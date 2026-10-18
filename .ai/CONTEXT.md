@@ -53,11 +53,13 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
+| **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **ready** — Level 3, operator approval + D1 | Make the task-server's post-commit turn hint reach the gateway; scheduler, effects consumer and inbox wake all wake on that one signal (polls → safety nets). Today worker finish → Manager wake is polled (16.5 s live). |
+| **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | PR #205 (S0) | **ACTIVE** — S1 Claude/Codex/OpenCode workers in parallel worktrees, then S2 carrier cleanup | Finish A82 below the admission layer: each backend gets ONE body per operation under its natural name (`create_session`/`resume_session`/`compact_session`/`cancel`); `run_managed_*` twins, `if managed` branches, per-backend wall clocks, flags, OpenCode CLI and PrintResume deleted; carrier alone decides turn limits (`TurnControl`). |
+| **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | **DONE** — full arc 0→8b merged + LIVE (`prod-0d593c6`, schema 43); convergence cutoff shipped (PR #199) + live-smoke neutral | Unified durable turn queue COMPLETE: born-managed sessions, single admission authority, legacy *admission/session-execution* branches deleted (Stage 8b) — **correction 2026-10-08:** 8b touched no `src/backends/` or `src/worker/` file; backend-level duplicate paths remain → A102. Proven live: FIFO, Codex + opencode-server managed turns, agent-source send. Follow-ups (non-blocking): re-home `manager_loop_integration` wiring proof; verify `GATEWAY_UPLOAD_MAX_MB`; **A84 carry (o)** Case-outbox; **A101** in-session blocking-state surfacing (active). Cert: `A82_E2E_CERTIFICATION.md`. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
 | **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
 | **A96** | `AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE.md` | A94 + measured precision | blocked | Bounce a clearly-not-ready delivery instead of waking the Manager. |
 | **A97** | `AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX.md` | — | ready (Level 2) | Error-class keyword matching scans the agent's reply → wrong retry/pause class. Code fix. |
-| **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | active — **R0 merged + deployed 2026-10-02** (PR #182, flags OFF, nothing enrolled); Stage 8 next | Unified durable turn queue now on `main`. **Stage 8 prerequisites (open):** (1) **A84-scope completion consumer** — managed completions skip notify/telemetry/enrichment/session summary (final-review F1; Telegram users would never get the reply) — must land before ANY session is enrolled; (2) R1 operator-gated worker restarts on this host + Horse with `WORKER_MANAGED_TURNS=1`, psutil installed (`.venv/bin/pip install -c constraints.txt -e .`), `MESH_LOCAL_CARRIER_NODE_ID` set in the controller env (not in `compose.yaml`); (3) Stage 8a: born-managed sessions, migration enrolling existing sessions + protocol-0 drain predicate, OpenCode CLI retired (operator decision 2026-10-02), unenroll fixes (F2 hold/pause, F3 retry-pause/producer links), Telegram stop off-loop (F4), task-server enrollment cache TTL (F5), Codex close/forget N-A, refused-invoke close row N-B; (4) 8b: delete legacy session execution. **Rules:** never roll back to pre-A82 main while protocol-1 rows exist (main's `get_pending_tasks` has no protocol filter → double execution); rollback image `ai-team:pre-a82`, DB backup `~/ai-team-data/backups/mesh-pre-a82-20261002.db`. **Deferrals (s)–(v)** and all stage carries: packet §15/§16. Plan: packet + Stage 8 plan in session notes. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
 | **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
@@ -75,6 +77,15 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-10-09 — A104 done: the agent inbox is the ONLY answer to "what is waiting for this agent".**
+Completions are addressed to the session that REQUESTED the work (`mesh_tasks.sender_session_id`), written in the
+child's terminal txn, delivered as one wake, acked by the wake's completion or a tagged review; bounded (5 attempts,
+then dead + alert). Read it via `db.pending_for()` only — `tests/test_a104_single_pending_source.py` fails the build if a
+second pathway (wait-group ledger, A84 outbox, `cont:` tokens, oldest-N event folds, role addressing) returns.
+`CASE_COMPLETION_OUTBOX_ENABLED` is retired. Horse Managers may send a stale `SESSION_ID` (SDK env filter, A102
+follow-up); the gateway validates it and audits `inbox.requester_unresolved`. Tests: run multi-file sets with `-n 4`
+(DB template + xdist: wide set 8m → 3m; CI 5m43s → 2m38s).
 
 **2026-10-06 — Backlog burn-down: triage done; stateless cloud workers run GitHub issues on `Yuird/AI-team`.**
 All 27 open dispatch jobs were triaged against `main` @ `01446d7`. The record is
@@ -108,6 +119,21 @@ doability / safety / non-Jev-alternative). The full reasoning record is in
   - **DC-3:** no project-domain content to the Jev API until ruled.
 - **Rejected on purpose:** Jev for error classification (real bug → A97 code fix), model selection
   (contract forbids), session hygiene, Telegram intent, tool gates, skill routing (only 3 skills).
+
+**2026-10-02 — A82 Stage 8a (cutover) SUBMITTED — deploy runbook (do NOT deploy before R1).**
+Order: (1) **R1, operator-gated:** on this host and `Horse`: `.venv/bin/pip install -c constraints.txt -e .` (psutil), set `WORKER_MANAGED_TURNS=1` in the worker env, restart the worker (`kanebra-worker` PM2; Horse). (2) Controller `.env` (not `compose.yaml`): `MESH_LOCAL_CARRIER_NODE_ID=kanebra-worker` (= the local daemon's `WORKER_NODE_ID`). (3) Pre-checks on a read-only copy of `mesh.db` (below). (4) `sqlite3 mesh.db ".backup <backup>"`; keep the R0 image. (5) Merge 8a, rebuild, recreate gateway + task server (migration 43 applies at the first DB open, one txn: **~5 s on the Pi, fsync-bound** — on a live-DB copy the statements take ~0.14 s and the WAL COMMIT ~4.5 s, MeshDB open+migrate 5.6 s; the other process waits on the 15 s busy timeout). (6) Verify: `SELECT MAX(version) FROM schema_version` = 43; `SELECT COUNT(*) FROM sessions WHERE turn_queue_enrolled = 0` = 0; `curl http://127.0.0.1:9003/health` → `turn_queue.coverage_ok == true` (if false: `GET /api/turn-queue/coverage` with the dashboard token lists the uncovered (carrier, backend) pairs); no `event=managed_carrier_missing` in the gateway log; one web + one Telegram turn complete and notify.
+Pre-check SQL (`<host>` = hostname inside the gateway container, `<local>` = `MESH_LOCAL_CARRIER_NODE_ID`):
+```sql
+-- drain: protocol-0 session execution still open (pending ⇒ failed by migration 43 as legacy_execution_retired; claimed/running ⇒ delays that session's managed head until terminal)
+SELECT status, action, COUNT(*) FROM mesh_tasks WHERE COALESCE(queue_protocol, 0) = 0 AND COALESCE(session_id, '') != '' AND action IN ('create_session', 'resume_session', 'compact_session') AND status IN ('pending', 'claimed', 'running') GROUP BY status, action;
+-- capability: every worker re-registered (R1) with managed backends, online
+SELECT node_id, status, last_heartbeat, incarnation_id, managed_backends FROM nodes ORDER BY node_id;
+-- coverage: (carrier, backend) of open sessions no registered managed carrier covers — expect no rows
+WITH routes AS (SELECT CASE WHEN COALESCE(machine_id, '') IN ('', '<host>') THEN '<local>' ELSE machine_id END AS carrier, backend, COUNT(*) AS sessions FROM sessions WHERE COALESCE(status, '') != 'closed' AND backend != 'opencode' GROUP BY 1, 2)
+SELECT r.carrier, r.backend, r.sessions FROM routes r WHERE NOT EXISTS (SELECT 1 FROM nodes n, json_each(n.managed_backends) j WHERE n.node_id = r.carrier AND j.value = r.backend);
+-- retired: open OpenCode CLI sessions (readable/closable; turns refused 410) — tell their owners to start opencode-server sessions
+SELECT session_id, status, machine_id, updated_at FROM sessions WHERE backend = 'opencode' AND COALESCE(status, '') != 'closed';
+```
 
 **2026-10-02 — A82 Stage 8a READY, MERGE HELD: PR #185 (`feat/a82-stage8a` @ `0b34905`) reviewed ACCEPT + CI green. DO NOT MERGE OR DEPLOY before R1.**
 Merging puts the cutover on `main`; any routine gateway redeploy would then make every session turn 503 until workers run managed turns. Order: (1) R1 — operator restarts `ai-team-worker` (this host, `kanebra-worker`) and the Horse worker after `git pull --ff-only && .venv/bin/pip install -c constraints.txt -e .` with `WORKER_MANAGED_TURNS=1`; set `MESH_LOCAL_CARRIER_NODE_ID=kanebra-worker` in the controller `.env`; (2) verify nodes advertise `managed_backends`; (3) pre-check SQL (packet runbook), backup, merge #185, rebuild controller (migration 43 ≈5 s on the Pi, fsync-bound); (4) verify schema 43, `/health` `turn_queue.coverage_ok=true`, real turns on Claude/Codex/opencode-server. Rollback: `ai-team:pre-a82`-era images run on schema 43; never pre-A82 main with protocol-1 rows. Operator defaults pending confirmation: no-carrier single-box refuses session turns (`_REFUSE_SESSION_TURNS_WITHOUT_MESH`); offline registered carrier queues (`_QUEUE_TURNS_FOR_OFFLINE_CARRIER`). OpenCode CLI retired (operator decision).

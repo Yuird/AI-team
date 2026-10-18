@@ -21,7 +21,7 @@ import json
 import pytest
 
 from src.backends import claude_driver as cd
-from src.backends.claude_role_adapter import manager_tool_names
+from src.backends.claude_role_adapter import base_tool_names, manager_tool_names
 
 
 # --------------------------------------------------------------------------- #
@@ -51,8 +51,11 @@ _LEGACY_MANAGER_TOOLS = {
 }
 
 _ROLE_MANAGER_TOOLS = {
+    "mcp__manager__list_nodes",
     "mcp__manager__dispatch_worker",
     "mcp__manager__wait_for_worker",
+    "mcp__manager__whoami",
+    "mcp__manager__check_inbox",
     "mcp__manager__open_case",
     "mcp__manager__get_case",
     "mcp__manager__get_case_brief",
@@ -164,3 +167,78 @@ def test_jobs_grant_independent_of_manager(monkeypatch):
     tools = cd._session_allowed_tools()
     assert "mcp__jobs__watch_job" in tools
     assert not (_LEGACY_MANAGER_TOOLS & set(tools))
+
+
+# --------------------------------------------------------------------------- #
+# Base (universal) tool profile — every role gets it; CI-pinned to the jobs server
+# --------------------------------------------------------------------------- #
+
+def test_base_grant_matches_advertised_jobs_surface():
+    """base_v1 must grant EXACTLY the jobs server's advertised tools — a new jobs
+    tool that should be universal cannot be forgotten (and a privileged one must
+    not be smuggled onto the universal floor)."""
+    from scripts import mcp_jobs
+
+    advertised = {f"mcp__jobs__{tool['name']}" for tool in mcp_jobs._TOOLS}
+    assert set(base_tool_names()) == advertised
+
+
+def test_base_tools_reach_every_role(monkeypatch):
+    """The universal base tools are granted to manager, worker, and any future/
+    unmapped role alike (when the jobs server is configured)."""
+    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
+    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
+    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
+    for role in ("manager", "worker", "scientific_governor", "some_future_advisory", None):
+        tools = cd._session_allowed_tools(role=role)
+        assert set(base_tool_names()) <= set(tools), f"base tools missing for role={role!r}"
+
+
+def test_unmapped_role_is_least_privilege(monkeypatch):
+    """An unknown/new role resolves to base-only — it can NEVER inherit the manager
+    surface just by existing (least-privilege default in the role→profile registry)."""
+    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
+    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
+    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
+    tools = set(cd._session_allowed_tools(role="some_future_advisory"))
+    assert not (set(manager_tool_names()) & tools)
+    assert set(base_tool_names()) <= tools
+
+
+# --------------------------------------------------------------------------- #
+# A108 — dynamic tool-profile overlay flows through the driver grant end-to-end
+# --------------------------------------------------------------------------- #
+
+def _set_dynamic(monkeypatch, *, dynamic, overlay=""):
+    import src.control.db as _db
+    monkeypatch.setattr(_db, "runtime_flag_enabled",
+                        lambda name: dynamic if name == "TOOL_PROFILES_DYNAMIC" else False)
+    monkeypatch.setattr(_db, "runtime_flag_value",
+                        lambda name: overlay if name == "TOOL_PROFILES_OVERLAY" else None)
+
+
+def test_overlay_grants_extra_manager_tool_through_driver(monkeypatch):
+    """With the gate ON, an overlay-added manager tool reaches the Manager session's
+    allowed_tools — no code/redeploy, just the controller value."""
+    import json
+    from src.backends.claude_role_adapter import static_profile_tools
+    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
+    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
+    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
+    _set_dynamic(monkeypatch, dynamic=True, overlay=json.dumps(
+        {"profiles": {"manager_v1": static_profile_tools()["manager_v1"] + ["mcp__manager__brand_new"]}}))
+    tools = cd._session_allowed_tools(role="manager")
+    assert "mcp__manager__brand_new" in tools
+
+
+def test_gate_off_driver_grant_is_static(monkeypatch):
+    """Gate OFF ⇒ the driver grant is exactly the static surface (byte-identical)."""
+    import json
+    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
+    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
+    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
+    _set_dynamic(monkeypatch, dynamic=False, overlay=json.dumps(
+        {"profiles": {"manager_v1": ["mcp__manager__should_be_ignored"]}}))
+    tools = cd._session_allowed_tools(role="manager")
+    assert "mcp__manager__should_be_ignored" not in tools
+    assert _ROLE_MANAGER_TOOLS <= set(tools)

@@ -68,6 +68,8 @@ def _scrub_surrogates(obj: Any) -> Any:
 # always still carries {ok, reason} so the client owns the wording (no prose here).
 _REASON_STATUS = {
     "unknown_backend": 400,
+    # [A82 Stage 8a] retired backend (e.g. the OpenCode CLI): use opencode-server
+    "backend_retired": 410,
     "unknown_model": 400,
     "unknown_effort": 400,
     "invalid_repo_path": 400,
@@ -158,18 +160,6 @@ async def _session_turn_queue_enrolled(session_id: str) -> bool:
         raise _turn_queue_http(err)
 
 
-def _enrollment_kw(orchestrator: Any, enrolled: bool) -> Dict[str, Any]:
-    """[A82 Stage 4a rework] Pass the route's single enrollment decision on
-    (one marker read per request) — only when enrollment can exist, so the
-    no-enrollment legacy call is byte-identical to before."""
-    from src.control.db import get_db
-
-    db = get_db()
-    if db is None or db.any_session_enrolled() is False:
-        return {}
-    return {"turn_queue_enrolled": enrolled}
-
-
 def _turn_queue_http(err: Exception) -> HTTPException:
     """[A82 Stage 4a] Map a typed managed-queue outcome to a structured HTTP
     error (design §6 table); 429 carries Retry-After."""
@@ -217,6 +207,11 @@ async def _submit_managed_instruction(
             ),
             parent_flow_run_id=body.parent_flow_run_id,
             join_case_id=body.case_id,
+            requester_session_id=(
+                body.requester_session_id
+                if (principal or "").strip().lower() == AUTOMATION_PRINCIPAL
+                else None
+            ),
             extra_metadata=_instruction_extra_metadata(body),
             operation_id=idempotency_key,
             turn_queue_enrolled=True,
@@ -359,6 +354,12 @@ class InstructionBody(BaseModel):
     # for a Manager dispatching into its own Case. Attach only happens when
     # HARNESS_FLOW_DRIVE is ON; absent/None on every normal request ⇒ byte-identical.
     case_id: Optional[str] = None
+    # [A104 I2] The ai-team session that REQUESTED this work (mcp_manager
+    # dispatch_worker sends its own SESSION_ID). Only honoured on an automation
+    # dispatch; a completion is then addressed to that session's inbox. Absent on
+    # every operator request and on an un-redeployed mcp_manager (the gateway then
+    # resolves the requester server-side, role-free).
+    requester_session_id: Optional[str] = Field(default=None, max_length=128)
     # [Session-fork] Verbatim digest of the marked messages carried over from a
     # forked session. When present it is injected ONCE, fence-defused and re-clamped
     # (keeping the most recent tail) as a reference-only `<prior_context>` block on
@@ -440,6 +441,19 @@ class TurnRequestPageOut(BaseModel):
     enrolled: bool
     paused: bool
     hold: Optional[str] = None
+    # [A82 Stage 8a] Finished turns of this session whose post-commit effects
+    # (notification / history / telemetry) ended ``failed`` + the latest one.
+    effects_failed: int = 0
+    effects_failed_turn_id: Optional[str] = None
+    # [A101] Read-only projection of why the head managed turn is held, and the
+    # Case a quota pause can be resumed on. Pure mirror of the scheduler gates —
+    # it carries NO new behaviour; it only lets the session window surface the
+    # hold reason + the (unchanged) resume decision co-located with the composer.
+    # ``pause_reason`` ∈ {operator_hold, operator_pause, quota, transient, retry,
+    # manager_rebound, carrier_offline, backoff, legacy_draining, lineage}.
+    blocked: bool = False
+    pause_reason: Optional[str] = None
+    resume_case_id: Optional[str] = None
 
 
 class TurnRequestDetailOut(TurnRequestSummaryOut):
@@ -448,6 +462,10 @@ class TurnRequestDetailOut(TurnRequestSummaryOut):
     body: str = ""
     completed_at: Optional[str] = None
     flow_run_id: Optional[str] = None
+    # [A82 Stage 8a] A84 post-commit effects outcome of a finished turn
+    # (``failed`` = the reply/notification may never have reached the user).
+    effects_state: Optional[str] = None
+    effects_error: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: Dict[str, Any]) -> "TurnRequestDetailOut":

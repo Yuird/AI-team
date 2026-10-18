@@ -14,6 +14,7 @@ const REASON_KINDS: ReadonlySet<string> = new Set<SessionReasonKind>([
   "waiting_workers",
   "waiting_job",
   "open_case_idle",
+  "work_in_flight",
   "idle",
   "node_offline",
 ]);
@@ -113,6 +114,8 @@ export function toSession(raw: RawSessionView): Session {
     keepNote: raw.keep_note ?? "",
     reason: deriveReason(raw),
     turnQueue: toSessionTurnQueue(raw.turn_queue),
+    caseRole: raw.case_role ?? null,
+    currentCaseId: raw.current_case_id ?? null,
   };
 }
 

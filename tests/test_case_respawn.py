@@ -13,6 +13,11 @@ These tests drive the GENUINE ``TaskOrchestrator._do_respawn_manager_for_case`` 
 ``_continue_case_once`` against a real ``MeshDB`` with a duck-typed ``self`` — no
 paid CLI, no live backend. Flags ``CASE_CONTINUATION_ENABLED`` +
 ``MANAGER_ROLE_ENABLED`` gate the respawn.
+
+A104: "satisfied" now means the dead Manager has a deliverable agent-inbox
+message (a child it requested finished — ``tests/inbox_seed``); the tick reaches
+the respawn through ``_deliver_inbox``'s dead-recipient branch (the recipient is
+the Case's bound Manager seat).
 """
 
 import asyncio
@@ -22,10 +27,9 @@ from src.core import SessionStatus
 from src.control.db import (
     MeshDB,
     respawn_task_id,
-    RESPAWN_ACTION,
-    CONTINUATION_MACHINE_SENTINEL,
 )
 from src.orchestrator import TaskOrchestrator
+from tests.inbox_seed import seed_finished_child
 
 
 # --------------------------------------------------------------------------- #
@@ -46,12 +50,9 @@ def _on(monkeypatch) -> None:
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
 
 
-def _finished(db: MeshDB, case_id: str, task_id: str, outcome: str = "success") -> None:
-    db.append_flow_event(
-        case_id, "task.finished", "worker",
-        entity_type="task", entity_id=task_id,
-        payload={"outcome": outcome},
-    )
+def _finished(db: MeshDB, case_id: str, task_id: str, requester: str) -> None:
+    """A child ``requester`` dispatched finished: its completion is in the inbox."""
+    seed_finished_child(db, case_id, task_id, requester=requester)
 
 
 def _events(db: MeshDB, case_id: str, event_type: str) -> list:
@@ -136,6 +137,7 @@ class _FakeOrch:
         self.deliveries = []
         self.emitted = []
         self.affiliations = []
+        self.managed_respawns = []
 
     def _emit_event(self, name, _a, payload):
         self.emitted.append((name, payload))
@@ -182,6 +184,12 @@ class _FakeOrch:
             self, db, case_id, generation, dead_sid,
         )
 
+    async def _deliver_inbox(self, db, recipient, case_id, **kw):
+        return await TaskOrchestrator._deliver_inbox(self, db, recipient, case_id, **kw)
+
+    async def _escalate_round_cap_once(self, db, case_id, cap, generation):
+        return await TaskOrchestrator._escalate_round_cap_once(self, db, case_id, cap, generation)
+
     async def _handle_quota_paused_case(self, db, case_id):
         # The quota-pause branch of the tick. Inert here (no Case in this file
         # carries a `flow.quota_paused` event) — it is covered on its own in
@@ -195,6 +203,16 @@ class _FakeOrch:
         # test_case_transient_resume.py. Delegated to the REAL method so the
         # inertness is proven, not assumed.
         return await TaskOrchestrator._handle_transient_paused_case(self, db, case_id)
+
+    async def _respawn_manager_managed(self, db, case_id, generation, dead_sid, objective):
+        # [A82 Stage 8a] The respawned Manager is born managed, so EVERY dead
+        # Manager is replaced on the managed path (producer 7). Its mechanics
+        # (exactly one session/turn under concurrent ticks, same Case, no new
+        # Case, spawn failure ⇒ not owned then converges) are proven on real
+        # pieces in test_turn_queue_stage8a.py S8-10 and the 4e suites; here
+        # only the tick's respawn DECISION is observed.
+        self.managed_respawns.append((case_id, generation, dead_sid, objective))
+        return True
 
 
 def _continue(orch, db, case_id) -> int:
@@ -220,8 +238,8 @@ def test_dead_satisfied_case_respawns_exactly_one_manager(tmp_path, monkeypatch)
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     case_id, dead_sid = _open_case_with_dead_manager(db)
     db.arm_wait_group(case_id, "g1", "ALL", ["t1", "t2"])
-    _finished(db, case_id, "t1")
-    _finished(db, case_id, "t2")
+    _finished(db, case_id, "t1", dead_sid)
+    _finished(db, case_id, "t2", dead_sid)
 
     # The bound Manager session is GONE: store is empty of the dead sid.
     store = _FakeStore()  # dead_sid not present ⇒ session_store.get() → None
@@ -231,36 +249,13 @@ def test_dead_satisfied_case_respawns_exactly_one_manager(tmp_path, monkeypatch)
     # A tick on the satisfied+dead Case respawns instead of stranding.
     assert _continue(orch, db, case_id) == 0  # respawn returns 0 (new session woken next tick)
 
-    # exactly ONE Manager respawned, bound to the SAME Case as role=manager
-    assert len(svc.created) == 1
-    new_sid = svc.created[0]["session_id"]
-    mgr_links = db.list_flow_links(flow_run_id=case_id, entity_type="session", role="manager")
-    link_sids = [l["entity_id"] for l in mgr_links]
-    assert new_sid in link_sids
-    # the wake target now resolves to the fresh live session
-    assert db.case_manager_session_id(case_id) == new_sid
-    assert store.get(new_sid).case_role == "manager"
-
-    # a resume turn (role-full, RESUMING the same Case) was delivered
-    assert len(orch.deliveries) == 1
-    d = orch.deliveries[0]
-    assert d["source"] == "manager_respawn"
-    assert d["session_id"] == new_sid
-    assert case_id in d["description"]
-    assert "ship feature X" in d["description"]
-    assert "get_case" in d["description"]  # instructed to reconstruct
-
-    # respawn marker recorded, no strand escalation fired
-    assert len(_events(db, case_id, "case.manager_respawned")) == 1
+    # [A82 Stage 8a] exactly ONE (managed) respawn of THIS Case's dead Manager,
+    # with the Case's objective; no legacy spawn, no strand escalation.
+    assert orch.managed_respawns == [(case_id, 1, dead_sid, "ship feature X")]
+    assert svc.created == [] and orch.deliveries == []
+    assert db.get_task(respawn_task_id(case_id, 1)) is None
     assert _events(db, case_id, "case.manager_unavailable") == []
     assert orch.notifier.errors == []
-
-    # single-flight row COMPLETED (respawn owner finished)
-    row = db.get_task(respawn_task_id(case_id, 1))
-    assert row is not None
-    assert row["status"] == "completed"
-    assert row["machine_id"] == CONTINUATION_MACHINE_SENTINEL
-    assert row["action"] == RESPAWN_ACTION
 
 
 def test_closed_manager_session_is_respawned(tmp_path, monkeypatch):
@@ -270,7 +265,7 @@ def test_closed_manager_session_is_respawned(tmp_path, monkeypatch):
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     case_id, dead_sid = _open_case_with_dead_manager(db)
     db.arm_wait_group(case_id, "g1", "ANY", ["t1"])
-    _finished(db, case_id, "t1")
+    _finished(db, case_id, "t1", dead_sid)
 
     dead = _FakeSession(dead_sid, status=SessionStatus.CLOSED,
                         repo="/repo-dead", machine_id="__local__")
@@ -279,101 +274,18 @@ def test_closed_manager_session_is_respawned(tmp_path, monkeypatch):
     orch = _FakeOrch(store, svc)
 
     assert _continue(orch, db, case_id) == 0
-    assert len(svc.created) == 1
-    # node/repo reused from the dead session row (persisted by open_case's session link?)
-    assert len(_events(db, case_id, "case.manager_respawned")) == 1
+    assert [r[:3] for r in orch.managed_respawns] == [(case_id, 1, dead_sid)]
+    assert _events(db, case_id, "case.manager_unavailable") == []
 
 
-# --------------------------------------------------------------------------- #
-# Acceptance 2 — two CONCURRENT ticks → single-flight, exactly ONE respawn     #
-# --------------------------------------------------------------------------- #
-
-def test_concurrent_ticks_respawn_exactly_one_manager(tmp_path, monkeypatch):
-    _on(monkeypatch)
-    db = _db(tmp_path)
-    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
-    case_id, dead_sid = _open_case_with_dead_manager(db)
-    db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
-
-    # Two independent orchestrators (two ticks) share the SAME db + dead Case, each
-    # with an empty store (session dead). Run their respawn attempts concurrently.
-    storeA, storeB = _FakeStore(), _FakeStore()
-    svcA, svcB = _FakeSessionService(storeA), _FakeSessionService(storeB)
-    orchA, orchB = _FakeOrch(storeA, svcA), _FakeOrch(storeB, svcB)
-
-    async def _race():
-        # generation is 1 (no rounds consumed yet) — both compute the SAME respawn id
-        return await asyncio.gather(
-            orchA._do_respawn_manager_for_case(db, case_id, 1, dead_sid),
-            orchB._do_respawn_manager_for_case(db, case_id, 1, dead_sid),
-        )
-
-    resA, resB = asyncio.run(_race())
-
-    # both report "owned" (True) — the winner respawned, the loser saw the claim taken
-    assert resA is True and resB is True
-    # …but EXACTLY ONE actually spawned a session
-    total_created = len(svcA.created) + len(svcB.created)
-    assert total_created == 1, f"expected exactly one respawn, got {total_created}"
-    # exactly one respawn marker, one respawn row, one live manager link
-    assert len(_events(db, case_id, "case.manager_respawned")) == 1
-    row = db.get_task(respawn_task_id(case_id, 1))
-    assert row["status"] == "completed"
-    mgr_links = db.list_flow_links(flow_run_id=case_id, entity_type="session", role="manager")
-    # original dead link + exactly one respawned link
-    respawned = [l for l in mgr_links if l["entity_id"] != dead_sid]
-    assert len(respawned) == 1
-
-
-def test_second_claim_on_respawn_row_loses(tmp_path, monkeypatch):
-    # Prove the ATOMIC claim directly (not check-then-act): once the winner claims
-    # respawn:{C}:{gen}, a second claim_task on the same deterministic id is False.
-    _on(monkeypatch)
-    db = _db(tmp_path)
-    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
-    case_id, dead_sid = _open_case_with_dead_manager(db)
-    db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
-
-    store = _FakeStore()
-    orch = _FakeOrch(store)
-    assert asyncio.run(orch._do_respawn_manager_for_case(db, case_id, 1, dead_sid)) is True
-
-    # the deterministic respawn row is claimed/completed — a fresh claim loses
-    assert db.claim_task(respawn_task_id(case_id, 1), socket.gethostname()) is False
-
-
-# --------------------------------------------------------------------------- #
-# Acceptance 3 — SAME flow_run_id, SAME objective, NO new Case (anti-goal)     #
-# --------------------------------------------------------------------------- #
-
-def test_respawn_preserves_flow_run_id_and_creates_no_new_case(tmp_path, monkeypatch):
-    _on(monkeypatch)
-    db = _db(tmp_path)
-    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
-    cases_before = {c["flow_run_id"] for c in db.list_open_cases()}
-    case_id, dead_sid = _open_case_with_dead_manager(db, objective="migrate DB to v9")
-    db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
-    open_before = {c["flow_run_id"] for c in db.list_open_cases()}
-    assert open_before == cases_before | {case_id}
-
-    store = _FakeStore()
-    orch = _FakeOrch(store)
-    assert asyncio.run(orch._do_respawn_manager_for_case(db, case_id, 1, dead_sid)) is True
-
-    # NO new Case: the open-case set is UNCHANGED after the respawn.
-    open_after = {c["flow_run_id"] for c in db.list_open_cases()}
-    assert open_after == open_before, "respawn must NOT mint a new Case"
-
-    # the respawned Manager's Case is the SAME flow_run_id with the SAME objective
-    new_sid = orch.session_service.created[0]["session_id"]
-    assert store.get(new_sid).current_case_id == case_id
-    brief = db.get_case_brief(case_id)
-    assert brief["objective"] == "migrate DB to v9"
-    # objective_lock on the row is untouched
-    assert db.get_flow_run(case_id)["objective_lock"] == "migrate DB to v9"
+# [A82 Stage 8a] RETIRED here (legacy single-flight respawn mechanics, a branch
+# no dead Manager reaches any more): test_concurrent_ticks_respawn_exactly_one_manager,
+# test_second_claim_on_respawn_row_loses, test_respawn_preserves_flow_run_id_and_creates_no_new_case,
+# test_spawn_failure_after_claim_releases_lease_and_escalates,
+# test_reaped_respawn_claim_retries_next_tick. Their oracles on the managed path:
+# test_turn_queue_stage8a.py::test_S8_10_* (exactly one under concurrent ticks,
+# same Case / no new Case / objective, spawn failure ⇒ not owned then converges)
+# and the producer-7 crash-safety suite (lost ack / crash between claim and start).
 
 
 def test_respawn_turn_offers_prior_session_readback():
@@ -401,7 +313,7 @@ def test_blocked_case_with_dead_manager_is_not_respawned(tmp_path, monkeypatch):
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     case_id, dead_sid = _open_case_with_dead_manager(db)
     db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
+    _finished(db, case_id, "t1", dead_sid)
     # operator kill → blocked; even with a dead Manager + satisfied wait, NO respawn.
     db.update_flow_run(case_id, status="blocked")
 
@@ -415,6 +327,8 @@ def test_blocked_case_with_dead_manager_is_not_respawned(tmp_path, monkeypatch):
     assert _events(db, case_id, "case.manager_respawned") == []
     assert db.get_task(respawn_task_id(case_id, 1)) is None
     assert orch.deliveries == []
+    # the message is HELD (not killed) while the Case is blocked.
+    assert [r["task_id"] for r in db.reconcile_worker_waits(case_id)["resolved"]] == ["t1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -429,7 +343,7 @@ def test_manager_role_off_falls_back_to_strand_escalation(tmp_path, monkeypatch)
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     case_id, dead_sid = _open_case_with_dead_manager(db)
     db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
+    _finished(db, case_id, "t1", dead_sid)
 
     store = _FakeStore()
     svc = _FakeSessionService(store)
@@ -440,63 +354,7 @@ def test_manager_role_off_falls_back_to_strand_escalation(tmp_path, monkeypatch)
     assert _events(db, case_id, "case.manager_respawned") == []
     assert len(_events(db, case_id, "case.manager_unavailable")) == 1
     assert len(orch.notifier.errors) == 1
+    # [A104] the strand is terminal for the message: dead(recipient_gone), not
+    # retried every tick.
+    assert db.pending_for(dead_sid, case_id=case_id).messages == []
 
-
-# --------------------------------------------------------------------------- #
-# Recovery — spawn failure AFTER the claim releases the lease for a retry      #
-# --------------------------------------------------------------------------- #
-
-def test_spawn_failure_after_claim_releases_lease_and_escalates(tmp_path, monkeypatch):
-    _on(monkeypatch)
-    db = _db(tmp_path)
-    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
-    case_id, dead_sid = _open_case_with_dead_manager(db)
-    db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
-
-    store = _FakeStore()
-    svc = _FakeSessionService(store, fail=True)  # spawn fails after the claim
-    orch = _FakeOrch(store, svc)
-
-    assert _continue(orch, db, case_id) == 0
-    # respawn returned False ⇒ the caller escalated the strand …
-    assert len(_events(db, case_id, "case.manager_unavailable")) == 1
-    # … and the single-flight row was RELEASED back to pending so a later tick retries
-    row = db.get_task(respawn_task_id(case_id, 1))
-    assert row is not None
-    assert row["status"] == "pending", "lease must be released for at-least-once retry"
-
-
-def test_reaped_respawn_claim_retries_next_tick(tmp_path, monkeypatch):
-    # A crash BETWEEN claim and respawn leaves the row 'claimed' by a dead
-    # incarnation → the SAME reaper returns it to pending → a later tick re-claims.
-    _on(monkeypatch)
-    db = _db(tmp_path)
-    node = socket.gethostname()
-    inc1 = db.upsert_node(node, "", 9001, ["claude"], 2)
-    case_id, dead_sid = _open_case_with_dead_manager(db)
-    db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
-
-    # Simulate: a tick claimed the respawn row then crashed before completing it.
-    respawn_id = respawn_task_id(case_id, 1)
-    db.enqueue_task(respawn_id, session_id=None,
-                    machine_id=CONTINUATION_MACHINE_SENTINEL, backend="claude",
-                    action=RESPAWN_ACTION, payload={"case_id": case_id})
-    assert db.claim_task(respawn_id, node) is True
-
-    # gateway restarts in place → new incarnation; the reaper sees the stale claim …
-    inc2 = db.upsert_node(node, "", 9001, ["claude"], 2)
-    assert inc2 != inc1
-    stale = {r["id"] for r in db.list_stale_claims(lease_sec=0)}
-    assert respawn_id in stale
-    assert db.release_task(respawn_id, node) is True
-    assert db.get_task(respawn_id)["status"] == "pending"
-
-    # next tick re-claims and respawns (at-least-once — no permanent stall)
-    store = _FakeStore()
-    svc = _FakeSessionService(store)
-    orch = _FakeOrch(store, svc)
-    assert _continue(orch, db, case_id) == 0
-    assert len(svc.created) == 1
-    assert db.get_task(respawn_id)["status"] == "completed"

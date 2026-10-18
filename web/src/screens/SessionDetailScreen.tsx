@@ -22,6 +22,7 @@ import {
   MessagesSquare,
   FolderOpen,
   GitFork,
+  Copy,
   X,
   Pin,
 } from "lucide-react";
@@ -35,6 +36,7 @@ import { SessionTimeline, userAnchorId } from "../components/timeline/SessionTim
 import type { MessageSelection } from "../components/timeline/SessionTimeline";
 import { NewSessionSheet, type ForkContext } from "../components/sessions/NewSessionSheet";
 import { buildForkDigest, type MarkedMessage } from "../lib/forkDigest";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { useForkStore } from "../stores/forkStore";
 import { useManagerBootStore } from "../stores/managerBootStore";
 import { SessionTurns } from "../components/timeline/SessionTurns";
@@ -47,7 +49,9 @@ import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
 import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionTurnQueue, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
 import { TurnQueuePanel } from "../components/timeline/TurnQueuePanel";
-import { queueOwnedIds, transcriptFinishedIds } from "../lib/turnQueue";
+import { CaseResumePanel } from "../components/work/CaseResumePanel";
+import { queueOwnedIds, transcriptFinishedIds, waitingTurnIds } from "../lib/turnQueue";
+import { retiredBackendReason } from "../lib/backends";
 import { compactTokens } from "../components/timeline/SessionTurns";
 import { useSessionAffiliations } from "../hooks/useWork";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
@@ -611,8 +615,11 @@ export function SessionDetailScreen() {
   const { data: activity } = useSessionActivity(id, 30);
   // Pending/terminal dedup by durable id: a finished exchange wins over a card.
   const finishedIds = useMemo(() => transcriptFinishedIds(turns ?? []), [turns]);
+  // [A99 D1] The queue owns ONLY still-waiting turns. The instant a turn starts,
+  // it leaves this set, so the transcript (and its optimistic bubble) renders it
+  // in the chat — an active/finished turn is never hidden inside the queue.
   const queueIds = useMemo(
-    () => queueOwnedIds((turnQueue?.turns ?? []).map((turn) => turn.id), finishedIds),
+    () => queueOwnedIds(waitingTurnIds(turnQueue?.turns ?? []), finishedIds),
     [turnQueue, finishedIds],
   );
   const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? [], queueIds);
@@ -621,6 +628,8 @@ export function SessionDetailScreen() {
   );
   const running = session?.opState === "running";
   const closed = session?.lifecycle === "closed";
+  // [A82 Stage 8a] A retired-backend session stays readable; it takes no turns.
+  const retiredReason = retiredBackendReason(session?.backend);
   // Only treat as "loading" on the very first fetch — subsequent polls use
   // placeholderData so they never wipe the existing conversation.
   const loading = sessionsLoading || (messagesLoading && !messagesFetched);
@@ -650,18 +659,22 @@ export function SessionDetailScreen() {
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  // [Session-fork] Message multi-select → fork. Select mode is entered DELIBERATELY
-  // from the ⋮ menu ("Fork from messages"), NOT a long-press, so native text
-  // selection in bubbles is never hijacked. The action bar then forks the marked
-  // messages into a fresh session (any role: bare / worker / manager).
+  // Message multi-select is entered from the ⋮ menu, never by long-press, so
+  // native text selection in bubbles is not hijacked. Selected messages can be
+  // copied together or carried into a fork.
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [forkOpen, setForkOpen] = useState(false);
+  const [copyingSelection, setCopyingSelection] = useState(false);
+  const copyFeedbackTimer = useRef<number | null>(null);
 
   const exitSelect = useCallback(() => {
     setSelectMode(false);
     setSelectedIds(new Set());
   }, []);
+  useEffect(() => {
+    exitSelect();
+  }, [id, exitSelect]);
   const toggleSelect = useCallback((mid: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -852,6 +865,28 @@ export function SessionDetailScreen() {
         it.kind === "message" && selectedIds.has(it.message.id),
     )
     .map((it) => ({ id: it.message.id, role: it.message.role, text: it.message.text }));
+  const copySelectedMessages = useCallback(async () => {
+    if (markedMessages.length === 0) return;
+    const transcript = markedMessages
+      .map((message) => `${message.role === "user" ? "You" : "Agent"}: ${message.text}`)
+      .join("\n\n");
+    setCopyingSelection(false);
+    if (copyFeedbackTimer.current !== null) {
+      window.clearTimeout(copyFeedbackTimer.current);
+      copyFeedbackTimer.current = null;
+    }
+    try {
+      await copyTextToClipboard(transcript);
+      setCopyingSelection(true);
+      copyFeedbackTimer.current = window.setTimeout(() => {
+        setCopyingSelection(false);
+        copyFeedbackTimer.current = null;
+      }, 1500);
+    } catch {
+      setCopyingSelection(false);
+      setStatusBanner("Couldn't copy selected messages. Check clipboard access and try again.");
+    }
+  }, [markedMessages]);
   const forkContext: ForkContext | null = session
     ? {
         sourceSessionId: session.id,
@@ -1144,12 +1179,12 @@ export function SessionDetailScreen() {
                                 </button>
                               )
                             )}
-                            {!closed && timeline.length > 0 && (
+                            {timeline.some((item) => item.kind === "message") && (
                               <button
                                 onClick={() => act(startSelectMode)}
                                 className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
                               >
-                                <GitFork className="size-4" /> Fork from messages
+                                <GitFork className="size-4" /> Select messages
                               </button>
                             )}
                             <div className="my-1 border-t border-hairline" />
@@ -1298,8 +1333,7 @@ export function SessionDetailScreen() {
         </div>
         </div>
 
-        {/* [Session-fork] Selection action bar — appears while marking messages.
-            Fork carries the marked messages into a fresh session under one Case. */}
+        {/* Selection actions appear while marking messages. */}
         {selectMode && (
           <div className="flex items-center gap-2 border-t border-hairline bg-surface-1/95 px-3 py-2.5 backdrop-blur-xl">
             <button
@@ -1312,22 +1346,41 @@ export function SessionDetailScreen() {
             <span className="text-[13px] text-ink-soft">
               {selectedIds.size} selected
             </span>
-            <span className="ml-1 hidden text-[11px] text-ink-muted sm:inline">
-              Marked messages ride in as context
-            </span>
-            <button
-              onClick={() => setForkOpen(true)}
-              disabled={selectedIds.size === 0}
-              className="ml-auto flex items-center gap-1.5 rounded-full bg-accent-dim/60 px-4 py-2 text-[13px] font-medium text-accent ring-1 ring-inset ring-accent/30 transition-colors hover:bg-accent-dim disabled:opacity-50"
-            >
-              <GitFork className="size-4" />
-              Fork → new session
-            </button>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={() => void copySelectedMessages()}
+                disabled={selectedIds.size === 0}
+                className="flex items-center gap-1.5 rounded-full border border-hairline px-3.5 py-2 text-[13px] font-medium text-ink-soft transition-colors hover:bg-surface-2 disabled:opacity-50"
+              >
+                <Copy className="size-4" />
+                {copyingSelection ? "Copied" : "Copy selected"}
+              </button>
+              {!closed && (
+                <button
+                  onClick={() => setForkOpen(true)}
+                  disabled={selectedIds.size === 0}
+                  className="flex items-center gap-1.5 rounded-full bg-accent-dim/60 px-3.5 py-2 text-[13px] font-medium text-accent ring-1 ring-inset ring-accent/30 transition-colors hover:bg-accent-dim disabled:opacity-50"
+                >
+                  <GitFork className="size-4" />
+                  Fork
+                </button>
+              )}
+            </div>
           </div>
         )}
 
         {id && !closed && turnQueue?.enrolled && (
           <TurnQueuePanel sessionId={id} page={turnQueue} ownedIds={queueIds} />
+        )}
+
+        {/* Quota resume — shown for any manager session affiliated with a Case,
+            regardless of whether there is a queued managed turn. CaseResumePanel
+            polls /api/cases/{id}/resume-state directly and self-hides when there
+            is nothing to decide (not paused, no pending approval, manager alive).
+            Also covers the fallback path where resume_case_id is set via the
+            turn-queue block projection. */}
+        {id && !closed && session?.currentCaseId && session.caseRole === "manager" && (
+          <CaseResumePanel caseId={session.currentCaseId} />
         )}
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}
@@ -1338,7 +1391,17 @@ export function SessionDetailScreen() {
                 <ContextFillGauge contextFill={activity.contextFill} />
               </div>
             )}
-            <Composer sessionId={id} running={running} />
+            {retiredReason ? (
+              <div
+                role="status"
+                className="border-t border-hairline bg-surface-1/95 px-4 py-3 text-[13px] text-warn backdrop-blur-xl"
+                style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+              >
+                {retiredReason}
+              </div>
+            ) : (
+              <Composer sessionId={id} running={running} />
+            )}
           </>
         ) : id ? (
           // Closed sessions (e.g. a completed one-off opened from a push

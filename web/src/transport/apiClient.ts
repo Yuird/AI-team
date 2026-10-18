@@ -182,6 +182,18 @@ export interface TurnRequestPage {
   enrolled: boolean;
   paused: boolean;
   hold: string | null;
+  /** [A82 Stage 8a] Finished turns whose post-commit effects ended `failed`. */
+  effects_failed?: number;
+  effects_failed_turn_id?: string | null;
+  /** [A101] Read-only projection of why the head managed turn is held — a pure
+   * mirror of the scheduler gates (no behaviour). Lets the session window show
+   * the hold reason + the (unchanged) quota resume decision by the composer. */
+  blocked?: boolean;
+  /** quota | transient | retry | manager_rebound | carrier_offline | backoff |
+   * legacy_draining | lineage | operator_pause | operator_hold | null. */
+  pause_reason?: string | null;
+  /** The Case a quota pause can be resumed on (only set for `pause_reason:"quota"`). */
+  resume_case_id?: string | null;
 }
 
 export interface TurnRequestDetail extends TurnRequestSummary {
@@ -189,6 +201,9 @@ export interface TurnRequestDetail extends TurnRequestSummary {
   body: string;
   completed_at: string | null;
   flow_run_id: string | null;
+  /** [A82 Stage 8a] A84 post-commit effects outcome (`failed` ⇒ reply may not have been delivered). */
+  effects_state?: string | null;
+  effects_error?: string | null;
 }
 
 export interface TurnQueueControl {
@@ -268,13 +283,23 @@ export const api = {
     );
   },
 
-  /** Operator resolution of a held (recovery_required) turn; never replays it. */
+  /**
+   * Operator resolution of a held/stuck turn. A started turn is resolved
+   * `failed`/`cancelled` and is never replayed; a never-started `claimed` turn
+   * is `requeue`d (token-fenced release). `acknowledge` sends the
+   * `acknowledge_uncertain` flag the backend requires for a started turn — it is
+   * false for a safe requeue (no outcome to acknowledge).
+   */
   resolveTurnRecovery(
-    token: string, turnId: string, decision: "failed" | "cancelled", note = "",
+    token: string,
+    turnId: string,
+    decision: "failed" | "cancelled" | "requeue",
+    note = "",
+    acknowledge = true,
   ): Promise<TurnRecoveryResolution> {
     return turnMutation<TurnRecoveryResolution>(
       `/api/turn-requests/${encodeURIComponent(turnId)}/resolve-recovery`, token, "POST",
-      { decision, acknowledge_uncertain: true, note },
+      { decision, acknowledge_uncertain: acknowledge, note },
     );
   },
 

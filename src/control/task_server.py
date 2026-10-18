@@ -37,6 +37,7 @@ from src.control.db import cache_heartbeat_interval_sec, get_db
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
 from src.control.telemetry_store import TelemetryStore
+from src.core.build_info import build_info, node_build_skew
 from src.core.telemetry import TelemetryEvent
 
 logger = logging.getLogger(__name__)
@@ -450,6 +451,15 @@ class DeregisterPayload(BaseModel):
     node_id: str
 
 
+# A worker pools at most a few dozen live sessions; the cap bounds the IN-query.
+_MAX_RECONCILE_SESSION_IDS = 500
+
+
+class SessionReconcilePayload(BaseModel):
+    node_id: str
+    session_ids: List[str] = Field(default_factory=list, max_length=_MAX_RECONCILE_SESSION_IDS)
+
+
 class ClaimPayload(BaseModel):
     node_id: str
 
@@ -582,10 +592,13 @@ def health() -> Dict[str, Any]:
     db = get_db()
     stats = db.stats() if db else {}
     mesh_health = get_mesh_health()
+    build = build_info()
     return {
         "status": "ok",
         "db": stats,
         "mesh_health": mesh_health.stats(),
+        # Counts only — node ids stay behind auth (/nodes).
+        "build": {**build.model_dump(), **node_build_skew(get_registry().list_all(), build.git_sha)},
     }
 
 
@@ -799,6 +812,16 @@ def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
         # Unknown node — prompt re-register instead of silently failing
         raise HTTPException(status_code=404, detail="Node not found; send /nodes/register first")
     return {"status": "ok"}
+
+
+@app.post("/nodes/sessions/reconcile", dependencies=[Depends(_require_auth)])
+def reconcile_node_sessions(payload: SessionReconcilePayload) -> Dict[str, List[str]]:
+    """Which of a worker's pooled backend sessions the gateway already closed.
+
+    The worker closes (and tree-kills) every id returned — the backstop for a
+    ``close_session`` teardown that never reached it (reaped, lost, or skipped).
+    """
+    return {"closed": get_db().terminal_session_ids(payload.session_ids)}
 
 
 @app.post("/nodes/deregister", dependencies=[Depends(_require_auth)])

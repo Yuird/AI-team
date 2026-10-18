@@ -14,7 +14,6 @@ import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { Button } from "../components/ui/Button";
 import { WorkCaseRow } from "../components/work/WorkCaseRow";
-import { PausedCaseInbox } from "../components/work/PausedCaseInbox";
 import { NewSessionSheet } from "../components/sessions/NewSessionSheet";
 import { useSweepOrphanedCases, useWorkList } from "../hooks/useWork";
 import { BUCKET_ORDER, bucketMeta } from "../lib/workPresentation";
@@ -124,9 +123,9 @@ export function WorkScreen() {
         <NewSessionSheet initialRole="manager" onClose={() => setInvokeOpen(false)} />
       )}
 
-      {/* Cases whose quota window reopened and are waiting on a decision. Renders
-          nothing when there are none — it is a prompt, not a permanent widget. */}
-      <PausedCaseInbox />
+      {/* [A101] Quota resume surfaced in the session window co-located with
+          the composer — see CaseResumePanel in SessionDetailScreen. The push
+          notification deep-links directly to the session. */}
 
       {sweepOpen && (
         <div className="px-4 pt-4">

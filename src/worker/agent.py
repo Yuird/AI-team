@@ -40,10 +40,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.control.turn_queue import CANCEL_MANAGED_ACTION, ManagedTurnOwnership
 
+from src.core.build_info import build_info
 from src.core.process_utils import (
     WORKER_INCARNATION_ENV,
     WORKER_NODE_ENV,
     reap_stale_worker_children,
+    reap_unowned_worker_children,
 )
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -527,8 +529,10 @@ def _discover_node_models(backends: List[str], instances: Optional[Dict[str, Any
                 for row in rows
                 if isinstance((name := row.get("model") or row.get("id")), str) and name.strip()
             ]
-        except Exception:
-            logger.warning("event=node_model_discovery_failed backend=codex", exc_info=True)
+        except Exception as exc:
+            # A missing binary is an install/PATH condition, not a bug: one line, no traceback.
+            logger.warning("event=node_model_discovery_failed backend=codex error=%s", exc,
+                           exc_info=not isinstance(exc, FileNotFoundError))
             discovered["codex"] = []
     for static_backend in ("claude", "opencode", "opencode-server"):
         if static_backend in backends:
@@ -2416,6 +2420,7 @@ class WorkerAgent:
     def _register(self) -> None:
         # [A82 Stage 3] Advertise protocol 1 only for backends with a managed path.
         managed_backends = self._managed_backends()
+        build_info()  # pin the loaded commit at startup, before the checkout can move
         self._http.post("/nodes/register", {
             "node_id": self.cfg.node_id,
             "tailscale_ip": self.cfg.tailscale_ip,
@@ -2514,6 +2519,115 @@ class WorkerAgent:
                     pass
         return total
 
+    def _reconcile_pooled_sessions_once(self) -> Dict[str, int]:
+        """Close pooled sessions the gateway has already closed, then reap this
+        worker's own claude children that no pooled session owns.
+
+        Backstop for a ``close_session`` teardown that never arrived (reaped
+        before claim, skipped, lost): without it the process lives until the
+        worker restarts. Ids the gateway does not know are left alone.
+        """
+        closed = 0
+        owned: List[int] = []
+        for name, backend in (self._backends or {}).items():
+            ids_fn = getattr(backend, "live_session_ids", None)
+            if not callable(ids_fn):
+                continue
+            ids: List[str] = [s for s in ids_fn() if not s.startswith("oneoff-")]
+            if ids:
+                resp = self._http.post(
+                    "/nodes/sessions/reconcile",
+                    {"node_id": self.cfg.node_id, "session_ids": ids[:500]},
+                ) or {}
+                for sid in resp.get("closed", []):
+                    session = _make_session_from_payload(
+                        {"session": {"session_id": sid, "backend": name}}
+                    )
+                    try:
+                        backend.close(session)
+                        closed += 1
+                    except Exception as e:
+                        logger.warning(
+                            "event=session_reconcile_close_failed session_id=%s err=%s", sid, e,
+                        )
+            pids_fn = getattr(backend, "owned_pids", None)
+            if callable(pids_fn):
+                owned.extend(pids_fn())
+        reaped = reap_unowned_worker_children(self._incarnation_id, self.cfg.node_id, owned)
+        return {"closed": closed, "reaped": len(reaped)}
+
+    async def _session_reconcile_loop(self) -> None:
+        """Run ``_reconcile_pooled_sessions_once`` every WORKER_SESSION_RECONCILE_SEC
+        (default 12h; 0 disables). The first sweep runs 10 min after boot."""
+        try:
+            interval = int(os.environ.get("WORKER_SESSION_RECONCILE_SEC", "43200"))
+        except ValueError:
+            interval = 43200
+        if interval <= 0:
+            logger.info("event=session_reconcile_disabled node_id=%s", self.cfg.node_id)
+            return
+        delay = min(interval, 600)
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown.wait(), timeout=delay)
+                return
+            except asyncio.TimeoutError:
+                pass
+            delay = interval
+            try:
+                res = await asyncio.to_thread(self._reconcile_pooled_sessions_once)
+                if res["closed"] or res["reaped"]:
+                    logger.warning(
+                        "event=session_reconcile node_id=%s closed=%d reaped=%d",
+                        self.cfg.node_id, res["closed"], res["reaped"],
+                    )
+            except Exception as e:
+                logger.warning("event=session_reconcile_failed node_id=%s err=%s", self.cfg.node_id, e)
+
+    def _memory_watchdog_sample(self) -> Optional[dict]:
+        """[A98 O7] Sample this worker process tree's RSS vs a threshold and warn
+        BEFORE the OOM-killer fires (the 2026-10-07 incident had NO such trail — a
+        background TRAIN + a heavy script almost certainly OOM-killed the daemon with
+        zero warning). ON by default; opt-out WORKER_MEMORY_WATCHDOG_DISABLED.
+        Thresholds: WORKER_MEMORY_WATCHDOG_PCT (percent of total RAM, default 85) and
+        WORKER_MEMORY_WATCHDOG_MB (absolute RSS ceiling MB; 0 = unset). Returns a
+        compact dict for the heartbeat, or None if disabled/unavailable. Never raises.
+        """
+        try:
+            from src.control.db import worker_memory_watchdog_disabled
+            if worker_memory_watchdog_disabled():
+                return None
+            import psutil  # hard dep (constraints); guard anyway
+            proc = psutil.Process()
+            rss = proc.memory_info().rss
+            # Include child processes (the claude CLI subprocesses + any heavy script)
+            for child in proc.children(recursive=True):
+                try:
+                    rss += child.memory_info().rss
+                except Exception:
+                    pass
+            total = psutil.virtual_memory().total or 0
+            pct = round(100.0 * rss / total, 1) if total else 0.0
+            rss_mb = int(rss / (1024 * 1024))
+            pct_thr = float(os.environ.get("WORKER_MEMORY_WATCHDOG_PCT", "85") or 85)
+            mb_thr = float(os.environ.get("WORKER_MEMORY_WATCHDOG_MB", "0") or 0)
+            over = (pct >= pct_thr) or (mb_thr > 0 and rss_mb >= mb_thr)
+            if over:
+                last = getattr(self, "_last_mem_warn_at", 0.0)
+                now = time.monotonic()
+                if now - last >= 60.0:  # throttle to once/min
+                    self._last_mem_warn_at = now
+                    logger.warning(
+                        "event=worker_memory_pressure node_id=%s rss_mb=%d pct=%.1f "
+                        "pct_threshold=%.1f mb_threshold=%.0f live_sessions=%d "
+                        "— approaching memory limit; OOM risk (A98 O7)",
+                        self.cfg.node_id, rss_mb, pct, pct_thr, mb_thr,
+                        self._count_live_backend_sessions(),
+                    )
+            return {"rss_mb": rss_mb, "pct": pct, "over_threshold": bool(over)}
+        except Exception:
+            return None
+
     def _live_state(self) -> dict:
         """Snapshot of current operational state for heartbeat reporting.
 
@@ -2522,7 +2636,7 @@ class WorkerAgent:
         max_concurrent when the poll loop fetches a batch larger than the
         semaphore allows.
         """
-        return {
+        state = {
             "v": 1,
             "active_tasks": list(self._active.keys()),
             "active_task_details": dict(self._active_meta),
@@ -2533,7 +2647,14 @@ class WorkerAgent:
             # Pooled live backend sessions (may exceed active_tasks: an idle
             # session keeps its claude process warm between turns).
             "live_sessions": self._count_live_backend_sessions(),
+            # Commit this worker process loaded; the task-server compares it
+            # with its own build to surface gateway/worker version skew.
+            "build_sha": build_info().git_sha,
         }
+        mem = self._memory_watchdog_sample()
+        if mem is not None:
+            state["memory"] = mem  # rides on extra="allow" LiveStatePayload (A98 O7)
+        return state
 
     async def _heartbeat_loop(self) -> None:
         _consecutive_failures = 0
@@ -3335,6 +3456,7 @@ class WorkerAgent:
         quota_observer = asyncio.create_task(self._quota_observe_loop())
         quota_prewarm = asyncio.create_task(self._quota_prewarm_supervisor_loop())
         controller_state_refresh = asyncio.create_task(self._controller_state_loop())
+        session_reconcile = asyncio.create_task(self._session_reconcile_loop())
         if self._canary:
             logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
             poller = asyncio.create_task(self._shutdown.wait())
@@ -3388,9 +3510,9 @@ class WorkerAgent:
             for t in pending:
                 t.cancel()
 
-        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh):
+        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, session_reconcile):
             t.cancel()
-        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, return_exceptions=True)
+        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, session_reconcile, return_exceptions=True)
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart

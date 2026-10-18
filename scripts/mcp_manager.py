@@ -36,7 +36,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -136,6 +135,21 @@ def _token_candidates() -> List[str]:
     return out
 
 
+def _self_session_id() -> str:
+    """The CALLER's OWN gateway session id, resolved from the process environment.
+
+    This MCP server runs INSIDE the requesting agent's own session process; the
+    carrier/backend exports that session's gateway ``session_id`` into the env as
+    ``AI_TEAM_SESSION_ID`` (``SESSION_ID`` as the legacy fallback), and the A102
+    identity filter guarantees it is THIS session's id, never a stale inherited one.
+    That value is exactly the id the Case API keys on (``sessions.session_id``) — it
+    is NOT the SessionStart/transcript uuid the agent may see in its boot context
+    (a different namespace the Case API 404s on). So the agent never has to know,
+    discover, or type its own id: every identity-scoped tool resolves it from here.
+    Empty string when absent (non-agent contexts: tests, a manual invocation)."""
+    return (os.environ.get("AI_TEAM_SESSION_ID") or os.environ.get("SESSION_ID") or "").strip()
+
+
 # Terminal vocab mirrors src/control/work_read_model.py so we agree with the
 # server on what "done" / "needs attention" means (kept in sync deliberately).
 _DONE_STATUSES = {"closed", "superseded", "done", "complete", "completed",
@@ -149,117 +163,6 @@ _MAX_PATH_CHARS = 1000
 _MAX_ID_CHARS = 128
 _MAX_FILES = 100
 _MAX_FILE_CHARS = 1000
-
-# ---------------------------------------------------------------------------
-# [O1] Skills library — named, versioned professional attitudes the Manager
-# attaches to a dispatch BY REFERENCE (skills=[id,…]) instead of re-authoring the
-# same attitude prose in every envelope. See docs/SKILLS_LIBRARY_O1.md.
-#
-# Mechanism shipped here is (A) reference-in-authoring, expanded ON THE WIRE: the
-# ids are resolved against the repo-local skills/ library on the MANAGER side and
-# the skill text is prepended to the objective before POST /api/instructions. That
-# reaches the worker regardless of which node it runs on (the text is carried, not
-# resolved worker-side) — the honest first slice given a remote worker (Horse) has
-# a SEPARATE filesystem that does not hold this library. Mechanism (B) — ids carried
-# and resolved worker-side for real wire/cache savings — is the documented follow-up
-# once the library is provisioned node-side.
-#
-# The whole feature is behind SKILLS_LIBRARY_ENABLED (default OFF). With the flag
-# OFF the `skills` param is ignored and the POST payload is byte-identical to today.
-# ---------------------------------------------------------------------------
-_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
-_MAX_SKILLS = 16               # bounded id list (§7 service-boundary lens)
-_MAX_SKILL_ID_CHARS = 64
-_MAX_SKILL_FILE_BYTES = 8192   # bounded skill-file size — oversized rejected early
-# Charset guard: an id maps to skills/<id>.md, so it must NOT be able to carry a
-# path separator or traversal. Lowercase alnum + single hyphens only.
-_SKILL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-
-
-def _skills_enabled() -> bool:
-    """SKILLS_LIBRARY_ENABLED flag — default OFF (byte-identical dispatch when OFF)."""
-    return os.environ.get("SKILLS_LIBRARY_ENABLED", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-
-
-def _resolve_skills(value: Any) -> Optional[str]:
-    """Resolve skills=[id,…] to a single injectable text block, or None.
-
-    §7 service-boundary lens (this resolver reads attacker-influenceable ids that
-    map to filesystem paths):
-      * bounded id list          — at most _MAX_SKILLS ids;
-      * charset + containment     — id must match _SKILL_ID_RE and resolve INSIDE
-                                    _SKILLS_DIR, so `../…` / absolute ids are refused
-                                    before any file is touched;
-      * unknown id ⇒ structured error — a missing skills/<id>.md raises ValueError,
-                                    it is NEVER silently dropped;
-      * bounded / malformed file  — oversized (> _MAX_SKILL_FILE_BYTES), empty, or
-                                    non-UTF-8 skill files are rejected early.
-
-    Raises ValueError on any of the above; the tool layer surfaces it as a clean MCP
-    tool error rather than a silent skip. Returns None when no skills are requested."""
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        raise ValueError("skills must be a list of skill ids (strings)")
-    if not value:
-        return None
-    if len(value) > _MAX_SKILLS:
-        raise ValueError(f"skills has too many entries (max {_MAX_SKILLS})")
-
-    library_root = _SKILLS_DIR.resolve()
-    seen: set[str] = set()
-    blocks: List[str] = []
-    for raw in value:
-        if not isinstance(raw, str):
-            raise ValueError("each skills entry must be a string skill id")
-        sid = raw.strip().lower()
-        if not sid:
-            raise ValueError("skill id cannot be empty")
-        if len(sid) > _MAX_SKILL_ID_CHARS:
-            raise ValueError(f"skill id too long (max {_MAX_SKILL_ID_CHARS}): {raw!r}")
-        if not _SKILL_ID_RE.match(sid):
-            raise ValueError(
-                f"invalid skill id {raw!r}: use lowercase letters, digits and single "
-                "hyphens only (no path separators / traversal)"
-            )
-        if sid in seen:
-            continue  # idempotent — a repeated id injects once
-        seen.add(sid)
-
-        path = (library_root / f"{sid}.md")
-        try:
-            resolved = path.resolve()
-            resolved.relative_to(library_root)
-        except (ValueError, OSError):
-            raise ValueError(f"skill id {sid!r} resolves outside the skills library")
-        if not resolved.is_file():
-            raise ValueError(
-                f"unknown skill id {sid!r}: no skills/{sid}.md in the library — "
-                "refusing to silently drop it (check the id or add the skill file)"
-            )
-        size = resolved.stat().st_size
-        if size > _MAX_SKILL_FILE_BYTES:
-            raise ValueError(
-                f"skill {sid!r} file is too large ({size} bytes > {_MAX_SKILL_FILE_BYTES}) "
-                "— rejecting an oversized skill file early"
-            )
-        try:
-            text = resolved.read_text(encoding="utf-8").strip()
-        except (UnicodeDecodeError, OSError) as exc:
-            raise ValueError(f"skill {sid!r} file is unreadable/malformed: {exc}")
-        if not text:
-            raise ValueError(f"skill {sid!r} file is empty/malformed")
-        blocks.append(text)
-
-    if not blocks:
-        return None
-    header = (
-        "SKILLS — standing professional attitudes attached BY REFERENCE for this task "
-        "(O1 skills library; treat these as binding as the objective below):"
-    )
-    return header + "\n\n" + "\n\n".join(blocks)
 
 # wait_for_worker is an IN-TURN BLOCKING poll: while it runs the Manager session is
 # BUSY and can neither react to other finished workers nor talk to the operator. So
@@ -395,6 +298,251 @@ def classify_status(status: Optional[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Carrier (node) discovery + machine-agnostic local-node resolution
+#
+# A Manager dispatching a worker must name a REGISTERED carrier node_id — but the
+# OS hostname is NOT the carrier id (e.g. this host is `DESKTOP-3PGTBMF` yet its
+# registered carrier is `Horse`), and there was no cheap way to list valid
+# carriers. These helpers read the one source of truth, GET /api/nodes, so the
+# Manager never has to hand-reverse-engineer the mesh:
+#   * _list_nodes()                   — raw node rows (node_id, tailscale_ip,
+#                                       status, managed_backends).
+#   * _online_managed_carriers(b)     — online carriers that registered backend b.
+#   * _local_identity()               — this host's identity signals (configured
+#                                       carrier id env, tailscale IP, hostname).
+#   * _resolve_local_carrier(b)       — map "the node I'm on" → its registered
+#                                       online managed-capable carrier id for b.
+#   * _carrier_unavailable_hint(...)  — rewrite a carrier_unavailable 503 into an
+#                                       actionable "online carriers: …" suggestion
+#                                       (modelled on the symbol index's near-match
+#                                       suggestion on a miss).
+# ---------------------------------------------------------------------------
+
+# Env vars a mesh node/carrier daemon exports for its OWN registered carrier id.
+# A Manager's MCP server runs inside the carrier's process env, so these resolve
+# "the node I'm on" → its exact registered node_id with zero network round-trips.
+# Ordered by directness; first non-empty wins.
+_LOCAL_CARRIER_ID_ENV = ("MESH_LOCAL_CARRIER_NODE_ID", "WORKER_NODE_ID", "AI_TEAM_NODE_ID")
+
+# Local-intent sentinels a Manager can pass as node_id to mean "the node I'm on"
+# (resolved to the registered carrier id), instead of hand-passing the mesh id.
+_LOCAL_NODE_SENTINELS = frozenset({"local", "here", "this", "this-node", "self"})
+
+
+def _as_str_list(value: Any) -> List[str]:
+    """Coerce a node field to a list[str], tolerating the DB-fallback shape.
+
+    The in-process registry serializes list fields as real JSON arrays, but the
+    DB-fallback path of GET /api/nodes returns a flat `SELECT *` row whose list
+    columns (managed_backends, backends, repos) are raw JSON *strings*
+    (e.g. '["claude", "codex"]'). Parse a string; pass a list through; else []."""
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, str)]
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        if isinstance(parsed, list):
+            return [v for v in parsed if isinstance(v, str)]
+    return []
+
+
+def _node_managed_backends(node: Dict[str, Any]) -> List[str]:
+    """Managed-capable backends for a node row, tolerant of BOTH /api/nodes shapes.
+
+    Live DB-fallback shape: a top-level `managed_backends` column, possibly a JSON
+    *string*. In-process registry shape: nested under `capabilities`. Read either."""
+    top = _as_str_list(node.get("managed_backends"))
+    if top:
+        return top
+    caps = node.get("capabilities") or {}
+    if isinstance(caps, dict):
+        return _as_str_list(caps.get("managed_backends"))
+    return []
+
+
+def _list_nodes() -> List[Dict[str, Any]]:
+    """All registered mesh nodes via GET /api/nodes (source of truth for carriers)."""
+    result = _api_request("GET", "/api/nodes")
+    nodes = result.get("nodes") if isinstance(result, dict) else None
+    return [n for n in (nodes or []) if isinstance(n, dict)]
+
+
+def _online_managed_carriers(backend: str) -> List[Dict[str, Any]]:
+    """Online carriers that registered `backend` as managed-capable."""
+    out: List[Dict[str, Any]] = []
+    for n in _list_nodes():
+        if (n.get("status") == "online") and backend in _node_managed_backends(n):
+            out.append(n)
+    return out
+
+
+def _local_identity() -> Dict[str, Any]:
+    """This host's identity signals used to resolve its registered carrier id.
+
+    Pure/local (no network): the configured carrier-id env vars, this host's
+    tailscale IP (from the tailscale CLI, best-effort), and the OS hostname. Each
+    is used ONLY to match a node row from /api/nodes — never trusted as a carrier
+    id on its own (the hostname notably is NOT the carrier id)."""
+    import socket
+    import subprocess
+
+    env_ids: List[str] = []
+    for key in _LOCAL_CARRIER_ID_ENV:
+        val = (os.environ.get(key) or "").strip()
+        if val and val not in env_ids:
+            env_ids.append(val)
+
+    tailscale_ip = ""
+    try:
+        proc = subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0:
+            tailscale_ip = (proc.stdout.splitlines() or [""])[0].strip()
+    except Exception:
+        tailscale_ip = ""
+
+    try:
+        hostname = socket.gethostname().strip()
+    except Exception:
+        hostname = ""
+
+    return {"env_ids": env_ids, "tailscale_ip": tailscale_ip, "hostname": hostname}
+
+
+def _resolve_local_carrier(backend: str) -> Dict[str, Any]:
+    """Map "the node I'm on" → its registered online managed-capable carrier id.
+
+    Returns ``{"node_id": str|None, "how": str, "candidates": [node_id,...]}``.
+    Resolution signals, in priority order, each confirmed against /api/nodes to be
+    ONLINE and managed-capable for `backend`:
+      1. configured carrier-id env (MESH_LOCAL_CARRIER_NODE_ID / WORKER_NODE_ID /
+         AI_TEAM_NODE_ID) — the carrier daemon's own id;
+      2. this host's tailscale IP matched to a node's tailscale_ip;
+      3. the OS hostname matched to a node_id (weakest; usually does NOT match).
+    `node_id` is None when nothing resolves OR the match is ambiguous (several
+    online carriers share the signal); `candidates` then lists the online carriers
+    so the caller can surface an actionable error. Never silently mis-routes."""
+    carriers = _online_managed_carriers(backend)
+    candidate_ids = [c.get("node_id") for c in carriers if c.get("node_id")]
+    by_id = {c.get("node_id"): c for c in carriers}
+    ident = _local_identity()
+
+    # 1) Configured carrier id env — exact, and still validated against the live
+    #    online managed-capable set (a stale env must not mis-route).
+    for env_id in ident["env_ids"]:
+        if env_id in by_id:
+            return {"node_id": env_id, "how": f"carrier-id env ({env_id})",
+                    "candidates": candidate_ids}
+
+    # 2) This host's tailscale IP → the node registered under it. Only unambiguous.
+    if ident["tailscale_ip"]:
+        ip_matches = [c.get("node_id") for c in carriers
+                      if c.get("tailscale_ip") == ident["tailscale_ip"]]
+        if len(ip_matches) == 1:
+            return {"node_id": ip_matches[0], "how": f"tailscale IP {ident['tailscale_ip']}",
+                    "candidates": candidate_ids}
+        if len(ip_matches) > 1:
+            return {"node_id": None, "how": f"ambiguous tailscale IP {ident['tailscale_ip']}",
+                    "candidates": ip_matches}
+
+    # 3) OS hostname → node_id (last resort; usually fails — hostname != carrier id).
+    if ident["hostname"] and ident["hostname"] in by_id:
+        return {"node_id": ident["hostname"], "how": f"hostname {ident['hostname']}",
+                "candidates": candidate_ids}
+
+    return {"node_id": None, "how": "unresolved", "candidates": candidate_ids}
+
+
+def _carrier_unavailable_hint(backend: str, attempted: Optional[str]) -> str:
+    """Actionable suffix listing the ONLINE managed-capable carriers for `backend`.
+
+    Best-effort: any failure reaching /api/nodes degrades to an empty string so the
+    original 503 still surfaces unchanged (never masks the real error)."""
+    try:
+        carriers = _online_managed_carriers(backend)
+    except Exception:
+        return ""
+    if not carriers:
+        return (f" No carrier is currently online AND managed-capable for backend "
+                f"{backend!r}. Check `list_nodes` / GET /api/nodes, or dispatch on a "
+                f"backend that has an online carrier.")
+    listing = ", ".join(
+        f"{c.get('node_id')} ({c.get('tailscale_ip') or 'no-ip'})" for c in carriers
+    )
+    lead = (f" {attempted!r} is not an online managed-capable carrier for backend "
+            f"{backend!r}." if attempted else
+            f" No local carrier resolved for backend {backend!r}.")
+    return (f"{lead} Online carriers for {backend!r}: {listing}. "
+            f"Pass one as node_id, or pass node_id='local' to auto-resolve the carrier "
+            f"for the node you are on. (See `list_nodes`.)")
+
+
+def _dispatch_api_request(method: str, path: str, payload: Optional[Dict[str, Any]],
+                          *, backend: str, attempted_node: Optional[str],
+                          headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """_api_request, but a `carrier_unavailable` 503 is REWRITTEN into an actionable
+    error listing the online managed-capable carriers for `backend`.
+
+    This is the highest-leverage single fix for the dispatch UX: the gateway's bare
+    503 ``no registered managed-capable carrier 'X' for backend 'claude'`` becomes
+    ``… Online carriers for 'claude': Horse (100.112.245.29), …`` so the Manager
+    can self-correct instead of locking up. Modelled on how the repo's symbol index
+    answers a miss with near-matches. Any other error propagates unchanged."""
+    try:
+        return _api_request(method, path, payload, headers=headers)
+    except RuntimeError as exc:
+        msg = str(exc)
+        # The 503 body is JSON {"reason":"carrier_unavailable", ...}; _api_request
+        # folds it into its message string. Match on the stable reason code.
+        if "carrier_unavailable" in msg or "no registered managed-capable carrier" in msg:
+            raise RuntimeError(msg + _carrier_unavailable_hint(backend, attempted_node)) from exc
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Tool: list_nodes  (cheap carrier discovery — no reverse-engineering the mesh)
+# ---------------------------------------------------------------------------
+
+def _list_nodes_tool(args: Dict[str, Any]) -> str:
+    """List registered mesh carriers so a Manager can pick a valid dispatch_worker
+    node_id (read-only over GET /api/nodes)."""
+    backend = _bounded_text(args.get("backend"), "backend", _MAX_ID_CHARS, required=False)
+    nodes = _list_nodes()
+    if not nodes:
+        return "No mesh nodes registered (GET /api/nodes returned none)."
+    rows = sorted(
+        nodes,
+        key=lambda n: (n.get("status") != "online", str(n.get("node_id") or "")),
+    )
+    lines = [f"Registered carriers ({len(rows)}) — online first:"]
+    for n in rows:
+        mb = _node_managed_backends(n)
+        if backend and backend not in mb:
+            continue
+        marker = "[online]" if n.get("status") == "online" else "[offline]"
+        lines.append(
+            f"  {marker} {n.get('node_id')}  status={n.get('status')!r}  "
+            f"ip={n.get('tailscale_ip') or '(none)'}  "
+            f"managed_backends={mb or '[]'}"
+        )
+    if backend:
+        lines.append("")
+        lines.append(
+            f"(filtered to carriers managed-capable for backend {backend!r}; "
+            f"only [online] carriers can take a dispatch.)"
+        )
+    lines.append("")
+    lines.append(
+        "dispatch_worker(node_id=…) needs an EXACT [online] carrier id from this list. "
+        "Or pass node_id='local' to auto-resolve the carrier for the node you are on."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool: dispatch_worker
 # ---------------------------------------------------------------------------
 
@@ -408,6 +556,29 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=False)
     node_id = _bounded_text(args.get("node_id"), "node_id", _MAX_ID_CHARS, required=False)
     backend = _bounded_text(args.get("backend"), "backend", _MAX_ID_CHARS, required=False) or "claude"
+
+    # [Dispatch UX] Machine-agnostic local-node resolution. A Manager that wants
+    # "dispatch on the node I'm on" must NOT have to hand-pass the exact registered
+    # carrier id (the OS hostname is NOT the carrier id — e.g. DESKTOP-3PGTBMF's
+    # registered carrier is `Horse`). Passing a local-intent sentinel resolves it
+    # against GET /api/nodes. An EXPLICIT non-sentinel node_id is passed through
+    # UNCHANGED (current callers keep working exactly as before). If the sentinel
+    # resolves to nothing/ambiguous, FAIL LOUD with the online-carrier list rather
+    # than silently mis-route.
+    node_resolution_note: Optional[str] = None
+    if node_id and node_id.strip().lower() in _LOCAL_NODE_SENTINELS:
+        resolved = _resolve_local_carrier(backend)
+        if not resolved["node_id"]:
+            raise ValueError(
+                f"dispatch_worker could not resolve the local carrier for backend "
+                f"{backend!r} ({resolved['how']})."
+                + _carrier_unavailable_hint(backend, None)
+            )
+        node_resolution_note = (
+            f"node_id={node_id!r} resolved to carrier {resolved['node_id']!r} "
+            f"via {resolved['how']}"
+        )
+        node_id = resolved["node_id"]
     # [Worker role] Explicit, opt-in role signal. When 'worker', the NEW observable
     # worker session below is stamped with role_boot='worker' so its driver boots
     # the Worker role (worker.md + worker tools). ABSENT ⇒ a legacy tier-0 worker
@@ -420,15 +591,6 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # CreateSessionBody.model at the create seam below. It CANNOT retro-set the
     # model of a reused session_id because the SDK client is cached at boot.
     model = _bounded_text(args.get("model"), "model", _MAX_ID_CHARS, required=False)
-
-    # [O1] Skills-by-reference. Resolve the requested skill ids to an injectable text
-    # block BEFORE any network call so an invalid/unknown id fails fast (never opens a
-    # worker session first). Gated by SKILLS_LIBRARY_ENABLED: with the flag OFF the
-    # `skills` param is ignored entirely and the POST payload is byte-identical to today.
-    skills_block: Optional[str] = None
-    skills_requested = args.get("skills") is not None
-    if _skills_enabled():
-        skills_block = _resolve_skills(args.get("skills"))
 
     # [DROP-2] Observable worker sessions. A worker must be a REAL, openable session
     # (case_role=worker, joined to the Manager's Case) — not a sessionless run_oneoff
@@ -487,7 +649,8 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
             # create-time signal, so it only applies when we open a session here;
             # reusing an existing session_id cannot retro-stamp it.
             sess_body["role_boot"] = "worker"
-        sess_result = _api_request("POST", "/api/sessions", sess_body)
+        sess_result = _dispatch_api_request(
+            "POST", "/api/sessions", sess_body, backend=backend, attempted_node=node_id)
         new_sess = sess_result.get("session") if isinstance(sess_result, dict) else None
         new_sid = new_sess.get("session_id") if isinstance(new_sess, dict) else None
         if not isinstance(new_sid, str) or not new_sid.strip() or len(new_sid) > _MAX_ID_CHARS:
@@ -498,12 +661,7 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         session_id = new_sid
         opened_session = True
 
-    # [O1] Mechanism (A): expand the referenced skills ON THE WIRE by prepending the
-    # resolved skill text to the objective. `objective` itself (used in the reply
-    # below) stays the Manager's own text. When the flag is OFF skills_block is None ⇒
-    # description == objective ⇒ this payload is byte-identical to today.
-    description = f"{skills_block}\n\n{objective}" if skills_block else objective
-    body: Dict[str, Any] = {"description": description}
+    body: Dict[str, Any] = {"description": objective}
     if session_id:
         body["session_id"] = session_id
     if cwd:
@@ -522,12 +680,20 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         # Use for a genuine child-CASE lineage edge; use case_id (above) to make the
         # worker JOIN the Manager's Case instead.
         body["parent_flow_run_id"] = parent_flow_run_id
+    # [A104 I2] Who is asking: this MCP server runs inside the requesting agent's
+    # session (the carrier exports its ai-team session id), so the worker's
+    # completion is addressed to THAT session's inbox. Absent ⇒ the gateway
+    # resolves the requester itself.
+    requester = _self_session_id()
+    if requester and requester != session_id:
+        body["requester_session_id"] = requester[:128]
 
     # [A82 Stage 4b rework 2] Declare this caller as automation: for a session
     # enrolled in the managed turn queue the dispatched turn is non-human and
     # never releases an operator stop hold (a label, not authentication).
-    result = _api_request("POST", "/api/instructions", body,
-                          headers={"X-AI-Team-Principal": "automation"})
+    result = _dispatch_api_request("POST", "/api/instructions", body,
+                                   backend=backend, attempted_node=node_id,
+                                   headers={"X-AI-Team-Principal": "automation"})
     task_id = result.get("task_id", "?")
     session = result.get("session") or {}
     sess_id = session.get("session_id") if isinstance(session, dict) else None
@@ -538,19 +704,9 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # task.finished — is already durable; this makes the WAIT durable too).
     # Best-effort: a relay failure (incl. the 404 when DURABLE_RELAY_ENABLED is
     # OFF, or an unavailable gateway) must NEVER break the dispatch itself.
-    wait_relay_note: Optional[str] = None
-    if case_id and task_id and task_id != "?":
-        try:
-            _api_request(
-                "POST", f"/api/cases/{urllib.parse.quote(case_id)}/waits",
-                {"task_id": task_id},
-            )
-            wait_relay_note = (
-                "durable wait recorded — recoverable after a restart via "
-                "reconcile_waits(case_id)."
-            )
-        except RuntimeError:
-            wait_relay_note = None  # relay disabled/unavailable — silent, non-fatal
+    # [A104] No wait marker is recorded any more: the gateway addresses this
+    # worker's completion to the requesting session's inbox by itself (the child
+    # carries its requester; the completion row is written with its terminal).
 
     resolved_sid = sess_id or session_id
     if opened_session:
@@ -566,6 +722,10 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         f"CWD:       {cwd or '(session/default)'}",
         f"Files:     {', '.join(files) if files else '(none)'}",
     ]
+    if node_resolution_note:
+        lines.append(f"Node:      {node_resolution_note}")
+    elif node_id:
+        lines.append(f"Node:      {node_id} (explicit carrier)")
     if model:
         if opened_session:
             lines.append(f"Model:     {model} (this worker session boots on it)")
@@ -574,24 +734,12 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
                 f"Model:     {model} REQUESTED but NOT applied — a reused session keeps its "
                 f"boot model; open a NEW worker session (omit session_id, pass cwd) to tier the model."
             )
-    if skills_block:
-        lines.append(
-            "Skills:    attached by reference and expanded into the objective on the wire "
-            "(O1, mechanism A)."
-        )
-    elif skills_requested and not _skills_enabled():
-        lines.append(
-            "Skills:    requested but IGNORED — SKILLS_LIBRARY_ENABLED is OFF (flag-off ⇒ "
-            "byte-identical dispatch). Activation is a Manager/operator decision."
-        )
     if case_id:
         lines.append(
             f"case_id: {case_id} — the worker JOINS this (the Manager's) Case as a member "
             f"task; it does NOT spawn a child Case. Worker completion leaves the Case OPEN "
             f"(Task finished != Case completed)."
         )
-        if wait_relay_note:
-            lines.append(f"relay: {wait_relay_note}")
     if parent_flow_run_id:
         lines.append(
             f"parent_flow_run_id: {parent_flow_run_id} — sent as the Manager→worker "
@@ -600,23 +748,22 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         )
     lines.append("")
     if case_id:
-        # [A38] A JOINED worker has NO flow_run of its own — its completion is a
-        # `task.finished` event on the Manager's Case timeline. wait_for_worker must
-        # therefore be given the Case as flow_run_id (task_id alone can't resolve a
-        # flow that does not exist); it filters the Case timeline by this task_id.
+        # [A104] The completion is addressed to THIS session's inbox (whoever
+        # requested the work) and delivered as ONE wake turn; nothing to arm.
         lines.append(
-            f"Next: after you have dispatched the workers for this batch, arm_wait_group("
-            f"case_id='{case_id}', member_task_ids=[…, '{task_id}'], condition='ANY') and RETURN "
-            f"control — the harness re-enters this Case with a review turn as each worker finishes, "
-            f"and a wake never interrupts a live operator turn. Only fall back to wait_for_worker("
-            f"task_id='{task_id}', flow_run_id='{case_id}') for a single synchronous wait when you "
-            f"have nothing else to do. (A joined worker has no own flow_run, so task_id ALONE cannot "
-            f"resolve it.) Neither holds a task slot."
+            f"Next: when this batch is dispatched, RETURN control. This worker's completion "
+            f"lands in YOUR inbox and you are woken ONCE with it (a wake never interrupts a live "
+            f"operator turn); review it with record_review(case_id='{case_id}', task_id='{task_id}'). "
+            f"Only if you need several parallel workers delivered TOGETHER, call arm_wait_group("
+            f"case_id='{case_id}', member_task_ids=[…, '{task_id}'], condition='ALL') — they then "
+            f"arrive in one wake when the last finishes. wait_for_worker(task_id='{task_id}', "
+            f"flow_run_id='{case_id}') is a synchronous fallback only. Neither holds a task slot."
         )
     else:
         lines.append(
-            f"Next: call wait_for_worker(task_id='{task_id}') to block until the worker's "
-            f"flow reaches a terminal/attention status. That poll does NOT hold a task slot."
+            f"Next: RETURN control — the completion lands in your inbox and wakes you once. "
+            f"wait_for_worker(task_id='{task_id}') is a synchronous fallback (it does NOT hold a "
+            f"task slot)."
         )
     return "\n".join(lines)
 
@@ -765,16 +912,10 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _reconcile_waits(args: Dict[str, Any]) -> str:
-    """[A46/M3.3] Recover the Manager's outstanding worker waits from the durable
-    ledger after a crash/restart.
-
-    ``wait_for_worker`` is an in-process poll — if the Manager/gateway crashes
-    mid-wait, that wait is lost. This tool asks the gateway to reconcile the Case's
-    durable ``worker.wait_pending`` markers against the already-durable
-    ``task.finished`` events: finished workers are RESOLVED (cleared), still-open
-    ones are returned as PENDING so the Manager can re-arm a fresh
-    ``wait_for_worker`` for each. Idempotent — safe to call repeatedly. A 404 means
-    the durable relay is disabled on the gateway (DURABLE_RELAY_ENABLED OFF)."""
+    """[A46 → A104] What is waiting for this Case, read from the agent inbox:
+    finished workers whose completion you have not consumed yet ("ready") and
+    requested workers still running. Read-only and idempotent; consumption happens
+    when you review a task (record_review with task_id) or a wake turn completes."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/waits/reconcile")
     if not result.get("ok"):
@@ -785,16 +926,16 @@ def _reconcile_waits(args: Dict[str, Any]) -> str:
     resolved = result.get("resolved") or []
     pending = result.get("pending") or []
     lines = [
-        f"Reconciled outstanding worker waits for Case {case_id}:",
-        f"  resolved (worker turn finished): {len(resolved)}",
-        f"  pending  (still running):        {len(pending)}",
+        f"Inbox state for Case {case_id}:",
+        f"  ready (finished, not yet reviewed): {len(resolved)}",
+        f"  running (requested, not finished):  {len(pending)}",
     ]
     for r in resolved:
-        lines.append(f"    ✓ {r.get('task_id')} → outcome={r.get('outcome')!r} (wait cleared)")
+        lines.append(f"    ✓ {r.get('task_id')} → outcome={r.get('outcome')!r} — review it (record_review task_id=…)")
     for p in pending:
-        lines.append(f"    … {p.get('task_id')} still open — re-arm with wait_for_worker(task_id='{p.get('task_id')}', flow_run_id='{case_id}')")
+        lines.append(f"    … {p.get('task_id')} still running — its completion will wake you; just return control")
     if not resolved and not pending:
-        lines.append("  (no outstanding waits — nothing to recover.)")
+        lines.append("  (nothing waiting.)")
     return "\n".join(lines)
 
 
@@ -803,15 +944,11 @@ def _reconcile_waits(args: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _arm_wait_group(args: Dict[str, Any]) -> str:
-    """[M3.4] Arm a wait-GROUP over a set of dispatched workers so the harness
-    autonomously RE-ENTERS this Case when the group is satisfied — no manual poke.
-
-    ``condition``: ANY (wake on each new completion, coalescing simultaneous ones,
-    until drained), ALL/NAMED (wake once when every member has finished). When the
-    group is satisfied over the finished-but-unconsumed members, the gateway
-    delivers ONE coalesced review turn to this (live+idle) Manager session. Use this
-    INSTEAD of serially long-polling ``wait_for_worker`` when you want the Case to
-    continue itself across worker completions. A 404/disabled reason means
+    """[M3.4 → A104 D2] OPTIONAL delivery filter. Every worker completion already
+    reaches your inbox and wakes you once — nothing needs arming. Use this only to
+    hold a parallel batch together: ``ALL`` (or NAMED) delivers the members'
+    completions in ONE wake when the last one finishes. ``ANY`` is the default
+    behaviour (each completion as it lands). A 404/disabled reason means
     CASE_CONTINUATION_ENABLED is OFF on the gateway."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     group_id = _bounded_text(args.get("wait_group_id"), "wait_group_id", _MAX_ID_CHARS, required=True)
@@ -829,10 +966,15 @@ def _arm_wait_group(args: Dict[str, Any]) -> str:
             f"arm_wait_group did NOT arm on Case {case_id}: {result.get('reason')}. "
             "(A 404/disabled reason means CASE_CONTINUATION_ENABLED is OFF on the gateway.)"
         )
+    if condition == "ANY":
+        return (
+            f"Recorded wait-group {group_id!r} (ANY) on Case {case_id}: that is already the "
+            "default — each completion reaches your inbox and wakes you once. Return control."
+        )
     return (
-        f"Armed wait-group {group_id!r} ({condition}) over {len(members)} worker task(s) on "
-        f"Case {case_id}. When satisfied, the harness autonomously re-enters this Case with ONE "
-        "coalesced review turn — you do not need to serially long-poll wait_for_worker."
+        f"Armed delivery filter {group_id!r} ({condition}) over {len(members)} worker task(s) on "
+        f"Case {case_id}: their completions are held and delivered together in ONE wake when "
+        "the last one finishes. Return control — no polling needed."
     )
 
 
@@ -929,10 +1071,10 @@ def _get_case_brief(args: Dict[str, Any]) -> str:
         lines.append("  (none dispatched yet.)")
     lines.append("")
     lines.append(
-        f"Waits — open (still running): {open_waits or '[]'}; "
-        f"ready (finished, reconcile them): {ready_waits or '[]'}"
+        f"Inbox — running (requested, not finished): {open_waits or '[]'}; "
+        f"ready (finished, not yet reviewed): {ready_waits or '[]'}"
     )
-    lines.append(f"Armed wait-groups ({len(groups)}):")
+    lines.append(f"Delivery filters ({len(groups)}):")
     for g in groups:
         lines.append(
             f"  • {g.get('wait_group_id')} ({g.get('condition')}) over "
@@ -941,11 +1083,12 @@ def _get_case_brief(args: Dict[str, Any]) -> str:
             + (f", present={g.get('presented_task_ids')}" if g.get('satisfied') else "")
         )
     if not groups:
-        lines.append("  (no live wait-groups.)")
+        lines.append("  (no delivery filters.)")
     lines.append("")
     lines.append(
-        "Resume from THIS state: reconcile any 'ready' waits, re-arm/continue the live "
-        "groups, review finished workers' git diffs, and decide close vs. rework."
+        "Resume from THIS state: review each 'ready' worker's git diff and record_review it "
+        "(task_id=…), return control while workers are still running (their completions wake "
+        "you), and decide close vs. rework."
     )
     return "\n".join(lines)
 
@@ -1012,11 +1155,37 @@ def _open_case(args: Dict[str, Any]) -> str:
     This is what lets a single persistent Manager session run the full loop for
     several objectives in a row — open → dispatch → review → close → open the next
     — instead of spawning a fresh session (and re-paying its boot context) per Case.
-    Requires the Manager's own ``session_id`` and a checkable ``completion_criteria``
+
+    The owner session is SELF-RESOLVED from the caller's process environment (the
+    same identity ``close_case`` and ``dispatch_worker`` already use) — you never
+    pass your own id. ``session_id`` is therefore optional; if you do pass it, it
+    MUST equal your own session (anything else is REFUSED, so a Case can never be
+    opened on another agent's session). Needs a checkable ``completion_criteria``
     that close_case will later demand. Returns the new case_id to use with
     dispatch_worker(case_id=...), record_review, get_case, and close_case."""
     objective = _bounded_text(args.get("objective"), "objective", _MAX_OBJECTIVE_CHARS)
-    session_id = _bounded_text(args.get("session_id"), "session_id", _MAX_ID_CHARS, required=True)
+    passed = _bounded_text(args.get("session_id"), "session_id", _MAX_ID_CHARS, required=False)
+    caller = _self_session_id()
+
+    # Ownership guard (self-resolution). The caller's own session is the ONLY owner
+    # a Case may be opened on. If an explicit id is passed it must match — passing a
+    # sibling/other id (e.g. one scraped from a doc header) is a refusal, not a
+    # silent mis-owned Case. When the env carries no identity (non-agent contexts)
+    # we fall back to the passed id so tests / manual calls still work.
+    if caller and passed and passed != caller:
+        return (
+            f"open_case REFUSED: session_id {passed!r} is not your session. Your session is "
+            f"{caller!r}. Do NOT pass session_id — open_case opens the Case on YOUR OWN session "
+            f"automatically (call whoami if unsure which id is yours). Opening a Case on another "
+            f"agent's session is not supported."
+        )
+    session_id = caller or passed
+    if not session_id:
+        return (
+            "open_case: could not resolve your session identity — neither AI_TEAM_SESSION_ID/"
+            "SESSION_ID is set in this process nor was a session_id passed. In a real agent "
+            "session your identity is always present; call whoami to see it."
+        )
     completion_criteria = _bounded_text(
         args.get("completion_criteria"), "completion_criteria", _MAX_OBJECTIVE_CHARS, required=False)
 
@@ -1041,16 +1210,110 @@ def _open_case(args: Dict[str, Any]) -> str:
     case_id = result.get("case_id", "?")
     cap_line = f"round_cap: {round_cap} (autonomous-continuation backstop)\n" if round_cap else ""
     return (
-        f"Opened Case {case_id} on session {session_id}.\n"
+        f"Opened Case {case_id} on YOUR session {session_id} (self-resolved owner).\n"
         f"Objective: {objective}\n"
         f"completion_criteria: {completion_criteria or '(none — set one so close_case can verify done)'}\n"
         f"{cap_line}\n"
         f"This is YOUR Case now. dispatch_worker(case_id='{case_id}') to run a worker into it, "
-        f"then arm_wait_group(case_id='{case_id}', …) to be re-entered on completion instead of "
-        f"block-polling. record_review after verifying its git diff, and close_case('{case_id}') "
+        f"then return control: its completion lands in your inbox and wakes you once. "
+        f"record_review after verifying its git diff, and close_case('{case_id}') "
         f"with a continuation_plan when the criteria are truly met. When you close it, this "
         f"session stays alive — open_case again for the next objective."
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool: whoami  (caller-only identity — never arbitrary)
+# ---------------------------------------------------------------------------
+
+def _whoami(args: Dict[str, Any]) -> str:
+    """Report the CALLER'S OWN identity and current Case — nothing else.
+
+    Resolves YOUR session id from the process environment (see _self_session_id):
+    this is the id open_case / close_case / dispatch_worker / record_review all key
+    on, and it is the id the Case API accepts — NOT any SessionStart/transcript uuid
+    you may see in your boot context. Takes no session argument on purpose: it can
+    only ever report you, so it can never be used to probe another agent. Read-only."""
+    sid = _self_session_id()
+    if not sid:
+        return (
+            "whoami: your session identity is not present in this process environment "
+            "(AI_TEAM_SESSION_ID/SESSION_ID unset). In a real agent session it is always set; "
+            "if you see this, the identity was not injected into the MCP server env."
+        )
+    node = (
+        os.environ.get("MESH_LOCAL_CARRIER_NODE_ID")
+        or os.environ.get("WORKER_NODE_ID")
+        or os.environ.get("AI_TEAM_NODE_ID")
+        or ""
+    ).strip()
+    lines = [
+        f"session_id: {sid}",
+        "  (this is YOUR gateway session id — the id the Case API keys on. You never need to "
+        "type it: open_case/close_case/dispatch_worker self-resolve it from here.)",
+    ]
+    if node:
+        lines.append(f"node: {node}")
+    turn = (os.environ.get("AI_TEAM_TURN_ID") or "").strip()
+    if turn:
+        lines.append(f"turn_id: {turn}")
+
+    # Current Case + role, from the authoritative session→case affiliation index,
+    # filtered to YOUR id only (the index returns the whole substrate; we never
+    # surface another session's row).
+    try:
+        index = _api_request("GET", "/api/work/affiliations/sessions")
+        mine = next(
+            (a for a in (index.get("affiliations") or []) if a.get("session_id") == sid),
+            None,
+        )
+    except Exception as exc:  # noqa: BLE001 — identity is still useful without enrichment
+        lines.append(f"current_case: (could not resolve: {exc})")
+        mine = "_skip_"
+    if mine is None:
+        lines.append("current_case: (none — you are not affiliated to any Case yet; open_case to start one)")
+    elif mine != "_skip_":
+        lines.append(f"current_case: {mine.get('flow_run_id')} (role={mine.get('role')}, status={mine.get('case_status')})")
+    lines.append("Call check_inbox to see what worker completions are waiting for you.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool: check_inbox  (the caller's outbox/inbox — what is waiting for ME)
+# ---------------------------------------------------------------------------
+
+def _check_inbox(args: Dict[str, Any]) -> str:
+    """What is waiting for the CALLER right now (read-only over the agent inbox).
+
+    Subscribe-by-poll surface over the ONE pending source (``pending_for``), keyed on
+    YOUR own session (self-resolved from the env — never an arbitrary id):
+      * resolved — finished worker completions addressed to you, not yet consumed
+        (review/act on them, then close or continue);
+      * pending  — work YOU dispatched that is still running.
+    An empty inbox means nothing is waiting. Writes nothing; consuming a completion
+    happens via record_review or being woken, not by this read."""
+    sid = _self_session_id()
+    if not sid:
+        return (
+            "check_inbox: your session identity is not present in this process environment "
+            "(AI_TEAM_SESSION_ID/SESSION_ID unset). Call whoami."
+        )
+    result = _api_request("GET", f"/api/agent/inbox?session_id={urllib.parse.quote(sid)}")
+    resolved = result.get("resolved") or []
+    pending = result.get("pending") or []
+    if not resolved and not pending:
+        return f"Inbox for {sid} is empty — nothing waiting, no dispatched work in flight."
+    lines = [f"Inbox for {sid}:"]
+    if resolved:
+        lines.append(f"  resolved ({len(resolved)}) — finished, waiting for you to review/act:")
+        for m in resolved[:50]:
+            case = f" case={m.get('case_id')}" if m.get("case_id") else ""
+            lines.append(f"    • task {m.get('task_id')} → {m.get('outcome')}{case}")
+    if pending:
+        lines.append(f"  pending ({len(pending)}) — dispatched work still running:")
+        for m in pending[:50]:
+            lines.append(f"    • task {m.get('task_id')}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1363,7 +1626,7 @@ _TOOLS = [
             "Dispatch a bounded task to a WORKER as a real gateway task (separate from the "
             "Manager's own session — never a sub-agent). Thin wrapper over the existing, "
             "auth-guarded, Level-3-gated POST /api/instructions. Returns the worker's task_id; "
-            "track it with wait_for_worker. Provide a professional, not-overstated objective. "
+            "its completion lands in YOUR inbox and wakes you once (no polling, nothing to arm). Provide a professional, not-overstated objective. "
             "If session_id is given the work runs in that existing worker session; otherwise, when "
             "you pass cwd, a NEW observable worker session is opened (case_role=worker, joined to "
             "your Case) that you and the operator can open, read, and resume — always prefer this "
@@ -1385,13 +1648,30 @@ _TOOLS = [
                 "cwd": {"type": "string", "description": "Working directory / repo path. Pass it (typically your Case's repo) so a real, openable worker session can be opened; without it the dispatch falls back to a sessionless one-off. RESOLVED ON THE TARGET NODE'S filesystem (see node_id) — a path that exists on your node but not on the gateway host requires node_id set to the node that actually holds the repo."},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Target files to focus the worker on (optional)."},
                 "case_id": {"type": "string", "description": "The Manager's OWN Case id. Pass it to make the worker JOIN this Case (member task, shared membership) instead of spawning a child Case — the M3.1 default. Worker completion leaves the Case OPEN."},
-                "node_id": {"type": "string", "description": "Node to pin the NEW worker session to: the worker boots on THIS node and cwd is resolved on ITS filesystem, so pin the node that actually holds the repo (e.g. a node worker so the session survives a gateway restart). Pass the node's EXACT node_id as shown by /api/nodes — it is matched exactly, NOT a fuzzy display-name lookup. OMIT ONLY if the repo lives on the gateway host itself: omitting routes the worker to the gateway host (__local__ — NOT the Manager's own node), where the gateway validates cwd against its own allowed_root and rejects a missing/outside path up front with invalid_repo_path. (A pinned remote node skips that up-front check — a bad cwd there surfaces at the worker's first turn instead.)"},
+                "node_id": {"type": "string", "description": "Node to pin the NEW worker session to: the worker boots on THIS node and cwd is resolved on ITS filesystem, so pin the node that actually holds the repo (e.g. a node worker so the session survives a gateway restart). Pass the node's EXACT registered node_id — use `list_nodes` to discover valid online carriers (the OS hostname is NOT the carrier id). SHORTCUT: pass 'local' (or 'here'/'this'/'self') to auto-resolve the registered carrier for the node you are on — no need to hand-pass the mesh id. If you pass an id that is not an online managed-capable carrier, the error now LISTS the valid online carriers for your backend. OMIT ONLY if the repo lives on the gateway host itself: omitting routes the worker to the gateway host (__local__ — NOT the Manager's own node), where the gateway validates cwd against its own allowed_root and rejects a missing/outside path up front with invalid_repo_path. (A pinned remote node skips that up-front check — a bad cwd there surfaces at the worker's first turn instead.)"},
                 "role": {"type": "string", "description": "Set to 'worker' to boot the NEW worker session with the canonical Worker role (worker.md identity + worker tools), gated by MANAGER_ROLE_ENABLED. Omit for a legacy tier-0 worker. Only applies when a new session is opened (with cwd); it cannot retro-stamp a reused session_id."},
                 "model": {"type": "string", "description": "REQUIRED when opening a NEW worker session (cwd with no session_id): explicitly choose the task-fit boot model. Use 'haiku' for narrow/easy-to-verify work, 'sonnet' for most bounded implementation and fixes, and 'opus' for architecture, high-risk, security-sensitive, or ambiguous work. The choice is sent only to session creation. Ignored when a session_id is reused because that worker keeps its boot model."},
                 "parent_flow_run_id": {"type": "string", "description": "Use ONLY for a genuine child-CASE lineage edge (child→parent in /api/flows). To keep the worker inside the Manager's Case, use case_id instead."},
-                "skills": {"type": "array", "items": {"type": "string"}, "description": "Optional O1 skills-library references (e.g. ['no-false-success','reuse-before-build','verify-claims-in-git']) — named, versioned professional attitudes attached BY REFERENCE instead of re-authored attitude prose. Each id resolves to skills/<id>.md and its text is expanded into the objective on the wire (mechanism A). Unknown id ⇒ structured error (never silently dropped). GATED by SKILLS_LIBRARY_ENABLED (default OFF): with the flag OFF this param is ignored and the dispatch is byte-identical. See docs/SKILLS_LIBRARY_O1.md."},
             },
             "required": ["objective"],
+        },
+    },
+    {
+        "name": "list_nodes",
+        "description": (
+            "List the registered mesh CARRIERS so you can pick a valid dispatch_worker "
+            "node_id (read-only over GET /api/nodes). Returns each node's node_id, status "
+            "(● online / ○ offline), tailscale_ip, and managed_backends. Only an ● online "
+            "carrier whose managed_backends includes your backend can take a dispatch. The "
+            "OS hostname is NOT the carrier id — use a node_id from THIS list, or pass "
+            "node_id='local' to dispatch_worker to auto-resolve the carrier for the node you "
+            "are on. Optional `backend` filters to carriers managed-capable for it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "backend": {"type": "string", "description": "Optional backend (e.g. 'claude') to filter to carriers that registered it as managed-capable."},
+            },
         },
     },
     {
@@ -1399,22 +1679,47 @@ _TOOLS = [
         "description": (
             "Open a NEW Case on YOUR OWN Manager session (POST /api/cases). This is how a single "
             "persistent Manager session takes on another objective without spawning a fresh session "
-            "— open -> dispatch_worker(case_id) -> arm_wait_group -> review -> close_case -> open the "
-            "next. Provide your own session_id and a checkable completion_criteria (close_case will "
-            "demand it). Pass round_cap to bound an autonomous continuation loop. Returns the new "
-            "case_id. Use when you finish one Case and want to start the next in the same "
-            "conversation, or when the operator hands you a new objective."
+            "— open -> dispatch_worker(case_id) -> return control (woken on completion) -> review -> close_case -> open the "
+            "next. The owner session is SELF-RESOLVED from your identity (exactly like close_case) — "
+            "do NOT pass session_id; you never need to know or type your own id. Provide a checkable "
+            "completion_criteria (close_case will demand it). Pass round_cap to bound an autonomous "
+            "continuation loop. Returns the new case_id. Use when you finish one Case and want to "
+            "start the next in the same conversation, or when the operator hands you a new objective. "
+            "(Call whoami if you want to confirm your identity / current Case first.)"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "objective": {"type": "string", "description": "The objective for the new Case. Ground it; do not overstate scope."},
-                "session_id": {"type": "string", "description": "YOUR OWN Manager session id (the session this Case is owned by)."},
+                "session_id": {"type": "string", "description": "OPTIONAL and normally omitted: your Case is opened on YOUR OWN session, resolved automatically from your identity. If passed it MUST equal your own session id — any other id is refused (a Case can never be opened on another agent's session)."},
                 "completion_criteria": {"type": "string", "description": "The checkable done-gate close_case will require (e.g. 'tests green; diff reviewed; PR opened')."},
-                "round_cap": {"type": "integer", "description": "Optional autonomous-continuation backstop: the MAX number of Wake-Dispatcher re-entries (arm_wait_group) before the Case escalates instead of looping. A safety bound, not a tuning knob — set a small value (e.g. 6-10) for a live autonomous run. Omit to use the engine default (50)."},
+                "round_cap": {"type": "integer", "description": "Optional autonomous-continuation backstop: the MAX number of Wake-Dispatcher re-entries (completion wakes) before the Case escalates instead of looping. A safety bound, not a tuning knob — set a small value (e.g. 6-10) for a live autonomous run. Omit to use the engine default (50)."},
             },
-            "required": ["objective", "session_id"],
+            "required": ["objective"],
         },
+    },
+    {
+        "name": "whoami",
+        "description": (
+            "Report YOUR OWN identity (read-only): your gateway session id — the id open_case, "
+            "close_case, dispatch_worker and record_review all key on, and the id the Case API "
+            "accepts (NOT the SessionStart/transcript uuid you may see at boot, which the Case API "
+            "404s on) — plus your node and your CURRENT Case (id, role, status) if any. Takes no "
+            "arguments: it can only ever report YOU, never another agent. Use it so you never have "
+            "to guess or scrape your own session id."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "check_inbox",
+        "description": (
+            "Show what is waiting for YOU right now (read-only over the agent inbox, the one "
+            "pending source): 'resolved' = finished worker completions addressed to you, not yet "
+            "consumed (review/act on them); 'pending' = work you dispatched that is still running. "
+            "Keyed on YOUR own session (resolved from your identity — never an arbitrary id). A "
+            "poll-style read; it writes nothing and consumes nothing."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "get_case",
@@ -1439,8 +1744,8 @@ _TOOLS = [
             "GET /api/cases/{case_id}/brief) — the Manager's single 'where am I on this Case' "
             "read after a context reset (compaction, restart, respawn). Returns objective + "
             "completion_criteria + round cap + rounds used + every DISPATCHED worker (finished? "
-            "outcome? latest review verdict?) + outstanding/ready worker waits + every ARMED "
-            "wait-group and whether it is currently satisfied. Prefer this over get_case when "
+            "outcome? latest review verdict?) + what your inbox holds (running vs. ready-to-review "
+            "workers) + every delivery filter (arm_wait_group ALL) and whether it is satisfied. Prefer this over get_case when "
             "resuming a Case you have lost the in-memory picture of; get_case is the minimal "
             "status-only read. Read-only — it decides nothing."
         ),
@@ -1514,8 +1819,8 @@ _TOOLS = [
             "'accepted' records approval, 'rework_requested' records that changes are needed "
             "(and blocks close_case until a later accept/waive supersedes it), 'waived' records "
             "an accepted-as-is with a reason. Pass task_id = the worker task you reviewed to tag "
-            "the verdict to it; this also marks that finish consumed so the harness won't re-wake "
-            "you about an already-reviewed worker. A 404 means the emitter is disabled on the gateway."
+            "the verdict to it; this also consumes that completion in your inbox so the harness won't "
+            "wake you about an already-reviewed worker. A 404 means the emitter is disabled on the gateway."
         ),
         "inputSchema": {
             "type": "object",
@@ -1531,7 +1836,8 @@ _TOOLS = [
     {
         "name": "wait_for_worker",
         "description": (
-            "Block (read-only long-poll) until a dispatched worker's flow reaches a terminal "
+            "SYNCHRONOUS FALLBACK — normally just return control: a worker's completion lands in your "
+            "inbox and wakes you once. Block (read-only long-poll) until a dispatched worker's flow reaches a terminal "
             "status (done/failed/cancelled) or an attention status (blocked/review/needs-decision), "
             "or until timeout. Give task_id (preferred) or flow_run_id. **For a worker dispatched "
             "into your Case (dispatch_worker with case_id), pass BOTH task_id AND flow_run_id=<your "
@@ -1558,14 +1864,10 @@ _TOOLS = [
     {
         "name": "reconcile_waits",
         "description": (
-            "Recover your OUTSTANDING worker waits after a crash/restart (M3.3 durable "
-            "relay). wait_for_worker is an in-process poll, so a Manager/gateway crash "
-            "mid-wait loses it. This asks the gateway to reconcile your Case's durable "
-            "worker.wait_pending markers against the already-durable task.finished events: "
-            "finished workers are RESOLVED (cleared) and still-open ones are returned as "
-            "PENDING so you can re-arm a fresh wait_for_worker for each. Idempotent — safe "
-            "to call repeatedly. Call it when you resume a Case and are unsure which workers "
-            "you were still waiting on. A 404/disabled reason means DURABLE_RELAY_ENABLED is OFF."
+            "Read what is waiting for your Case from the agent inbox (durable — survives any "
+            "crash/restart): finished workers whose completion you have not reviewed yet, and "
+            "requested workers still running (they will wake you when done). Read-only and "
+            "idempotent. Call it when you resume a Case and are unsure where things stand."
         ),
         "inputSchema": {
             "type": "object",
@@ -1578,13 +1880,10 @@ _TOOLS = [
     {
         "name": "arm_wait_group",
         "description": (
-            "Arm a wait-GROUP over dispatched workers so the harness AUTONOMOUSLY re-enters "
-            "this Case when the group is satisfied — the M3.4 alternative to serially "
-            "long-polling wait_for_worker. condition ANY = wake on each new completion "
-            "(coalescing simultaneous ones) until drained; ALL/NAMED = wake ONCE when every "
-            "member has finished. On satisfaction the gateway delivers ONE coalesced review "
-            "turn to this live+idle Manager session. Use it when you want the Case to continue "
-            "itself across worker completions instead of blocking. A 404/disabled reason means "
+            "OPTIONAL delivery filter. You do NOT need this to be woken: every worker completion "
+            "already lands in your inbox and wakes you once. Use condition ALL (or NAMED) only to "
+            "hold a parallel batch so its completions arrive together in ONE wake when the last "
+            "member finishes. ANY is the default behaviour. A 404/disabled reason means "
             "CASE_CONTINUATION_ENABLED is OFF on the gateway."
         ),
         "inputSchema": {
@@ -1714,8 +2013,11 @@ _TOOLS = [
 ]
 
 _TOOL_IMPLS = {
+    "list_nodes": _list_nodes_tool,
     "dispatch_worker": _dispatch_worker,
     "wait_for_worker": _wait_for_worker,
+    "whoami": _whoami,
+    "check_inbox": _check_inbox,
     "open_case": _open_case,
     "get_case": _get_case,
     "get_case_brief": _get_case_brief,

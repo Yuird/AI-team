@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from src.control import control_api
 from src.services.session_store import SessionStore
 from src.services.session_service import SessionService
+from src.control.db import get_db
+from tests.stage8a_legacy import unenrolled
 
 
 TOKEN = "test-write-token"
@@ -197,25 +199,12 @@ def test_instruction_threads_parent_flow_run_id(client, orch):
     assert orch.parent_flow_run_ids[-1] == "flow_parent_1"
 
 
-def test_instruction_to_session_flips_busy(client, orch, tmp_path):
-    from src.core.interfaces import SessionStatus
-    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
-    sid = res.session.session_id
-
-    r = client.post("/api/instructions", headers=_auth(),
-                    json={"description": "fix bug", "session_id": sid})
-    assert r.status_code == 200
-    assert r.json()["task_id"] == "task_web_1"
-    # submit_instruction called with source=web_session and the session's repo as cwd.
-    desc, called_sid, cwd, source = orch.submitted[-1]
-    assert (desc, called_sid, source) == ("fix bug", sid, "web_session")
-    assert cwd == str(tmp_path)
-    # Session went BUSY and recorded the task id.
-    s = orch.session_service.store.get(sid)
-    assert s.status == SessionStatus.BUSY
-    assert s.last_task_id == "task_web_1"
-
-
+# test_instruction_to_session_flips_busy RETIRED at the A82 Stage-8b convergence
+# cutoff: it asserted the legacy optimistic-BUSY write for an UNENROLLED session
+# turn via /api/instructions — the branch deleted with the legacy execution path
+# (a managed/enrolled turn never flips BUSY: queued is not busy). The managed
+# enrolled envelope is covered by
+# tests/test_turn_queue_producer1.py::test_P1_08_web_enrolled_envelope_and_no_busy.
 def test_instruction_unknown_session_404(client):
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "x", "session_id": "nope"})
@@ -323,6 +312,7 @@ def test_upload_local_session_writes_uploads_dir(orch, tmp_path):
 
     res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
     assert res.ok
+    unenrolled(get_db(), res.session.session_id)  # [A82 Stage 8a] legacy branch: an unenrolled session
 
     body = asyncio.run(
         control_api._store_session_upload(orch, res.session, "note.txt", b"hello")
@@ -340,6 +330,7 @@ def test_upload_local_session_with_instruction_references_deduped_name(orch, tmp
 
     res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
     assert res.ok
+    unenrolled(get_db(), res.session.session_id)  # [A82 Stage 8a] legacy branch: an unenrolled session
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     (upload_dir / "note.txt").write_text("old", encoding="utf-8")
@@ -405,6 +396,7 @@ def test_upload_remote_session_with_instruction_attaches_file_to_single_turn(
         repo_path=r"C:\Users\Cicada38\Projects\tokens_ingest",
     )
     assert res.ok
+    unenrolled(get_db(), res.session.session_id)  # [A82 Stage 8a] legacy branch: an unenrolled session
     res.session.machine_id = "Horse"
     orch.session_service.store.save(res.session)
     monkeypatch.setattr("src.control.node_inspector.session_node", lambda _session: "Horse")
@@ -806,6 +798,7 @@ def test_upload_unpinned_unwritable_repo_is_structured_500(client, orch, tmp_pat
     blocker = tmp_path / "not_a_dir"
     blocker.write_text("x", encoding="utf-8")
     session = _pin_session(orch, "", str(tmp_path))
+    unenrolled(get_db(), session.session_id)  # [A82 Stage 8a] legacy branch: an unenrolled session
     session.repo_path = str(blocker)
     orch.session_service.store.save(session)
 

@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionOrigin, SessionStatus
 from src.core.view_models import SessionView
-from src.backends.registry import is_valid_backend, DEFAULT_BACKEND
+from src.backends.registry import is_valid_backend, retired_backend_reason, DEFAULT_BACKEND
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,12 @@ class SessionService:
         telegram/user so existing behavior is unchanged).
         """
         backend = (backend or DEFAULT_BACKEND).strip().lower()
+        # [A102] Check retired BEFORE validity: a retired backend is no longer in
+        # _FACTORIES, so is_valid_backend returns False for it — the old order
+        # returned "unknown_backend" instead of the operator-friendly "backend_retired".
+        if retired_backend_reason(backend):
+            # [A82 Stage 8a] A retired backend takes no new session.
+            return CommandResult(False, reason="backend_retired", detail=retired_backend_reason(backend))
         if not is_valid_backend(backend):
             return CommandResult(False, reason="unknown_backend")
         # Fail early on a bad working directory (Move #38). For LOCAL sessions the
