@@ -259,7 +259,9 @@ _COST_DIMENSIONS: Dict[str, str] = {
 # Null convention (R2): a ``"nullable": "1"`` numeric entry stores an EMPTY string
 # for an explicit "unset" (JSON ``null`` on PUT); it renders as ``value: null``
 # and, for the SDK governor knobs, means "no cap" — it WINS over env, unlike
-# DELETE, which removes the row and falls back to env → default.
+# DELETE, which removes the row and falls back to env → default. A ``"positive":
+# "1"`` numeric entry rejects values <= 0 on write, so null is the ONLY way to
+# store "no cap" (a 0 must never silently mean "unlimited" on a money knob).
 RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "HARNESS_FLOW_DRIVE": {
         "default": "0",
@@ -528,17 +530,19 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "default": "",
         "value_type": "int",
         "nullable": "1",
+        "positive": "1",
         "effect_scope": "session_boot",
         "registry_writable": "1",
-        "description": "SDK-driver turn ceiling (max_turns) for new Claude SDK session processes. Registry → env CLAUDE_SDK_MAX_TURNS → no cap. null (empty row) or a non-positive value = no cap, overriding env; DELETE falls back to env. Read when a session process is created (on the worker, from the controller snapshot, refreshed ~every 30 s); a live process keeps its booted ceiling.",
+        "description": "SDK-driver turn ceiling (max_turns) for new Claude SDK session processes. Registry → env CLAUDE_SDK_MAX_TURNS → no cap. Value must be > 0; null (empty row) = no cap, overriding env; DELETE falls back to env. Read when a session process is created (on the worker, from the controller snapshot, refreshed ~every 30 s); a live process keeps its booted ceiling.",
     },
     "CLAUDE_SDK_MAX_BUDGET_USD": {
         "default": "",
         "value_type": "float",
         "nullable": "1",
+        "positive": "1",
         "effect_scope": "session_boot",
         "registry_writable": "1",
-        "description": "SDK-driver USD budget ceiling (max_budget_usd) for new Claude SDK session processes. Registry → env CLAUDE_SDK_MAX_BUDGET_USD → no cap. null (empty row) or a non-positive value = no cap, overriding env; DELETE falls back to env. Read when a session process is created (on the worker, from the controller snapshot, refreshed ~every 30 s); a live process keeps its booted ceiling.",
+        "description": "SDK-driver USD budget ceiling (max_budget_usd) for new Claude SDK session processes. Registry → env CLAUDE_SDK_MAX_BUDGET_USD → no cap. Value must be > 0; null (empty row) = no cap, overriding env; DELETE falls back to env. Read when a session process is created (on the worker, from the controller snapshot, refreshed ~every 30 s); a live process keeps its booted ceiling.",
     },
 }
 
@@ -597,15 +601,20 @@ def coerce_runtime_flag_value(flag_name: str, value: Any) -> str:
             return "1" if TypeAdapter(bool).validate_python(value) else "0"
         except ValidationError:
             raise ValueError(f"{flag_name} expects a bool value, got {value!r}") from None
+    positive = _truthy_flag(RUNTIME_FLAG_DEFINITIONS[flag_name].get("positive"))
     if value_type == "int":
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{flag_name} expects an int value, got {type(value).__name__}")
+        if positive and value <= 0:
+            raise ValueError(f"{flag_name} must be > 0; use null for no cap")
         return str(value)
     if value_type == "float":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{flag_name} expects a float value, got {type(value).__name__}")
         if not math.isfinite(float(value)):
             raise ValueError(f"{flag_name} expects a finite float value")
+        if positive and value <= 0:
+            raise ValueError(f"{flag_name} must be > 0; use null for no cap")
         return repr(float(value))
     if not isinstance(value, str):
         raise ValueError(f"{flag_name} expects a str value, got {type(value).__name__}")
@@ -723,10 +732,12 @@ def sdk_governor_ceilings() -> Dict[str, Any]:
 
     The env/default layer is the existing ``config.claude`` parse (A53), so with
     no registry row the result is byte-identical to the pre-A62 config read. A
-    registry row wins: empty (null) or non-positive ⇒ ``None`` (no cap), matching
-    the env convention. Rows resolve through ``_runtime_flag_row`` — the local DB
-    on a controller, the A88 controller snapshot on a worker (memory-only); a
-    worker without a snapshot (old controller, unreachable) falls back to env.
+    registry row wins: empty (null) ⇒ ``None`` (no cap). Writes reject <= 0, so a
+    non-positive or unparseable row (only reachable by a direct DB write) is
+    ignored with a warning and env applies — never read as "unlimited". Rows
+    resolve through ``_runtime_flag_row`` — the local DB on a controller, the A88
+    controller snapshot on a worker (memory-only); a worker without a snapshot
+    (old controller, unreachable) falls back to env.
     Never raises: a glitch here must not block a session boot."""
     out: Dict[str, Any] = {attr: None for _flag, attr in _SDK_GOVERNOR_FLAGS}
     try:
@@ -741,10 +752,13 @@ def sdk_governor_ceilings() -> Dict[str, Any]:
             continue
         try:
             parsed = _parse_runtime_flag_raw(runtime_flag_value_type(flag), str(row.get("value") or ""))
+            valid = parsed is None or parsed > 0
         except ValueError:
+            valid = False
+        if not valid:
             logger.warning("event=sdk_governor_registry_value_invalid flag=%s", flag)
             continue
-        out[attr] = parsed if parsed is not None and parsed > 0 else None
+        out[attr] = parsed
     return out
 
 

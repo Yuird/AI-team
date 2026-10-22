@@ -5,7 +5,7 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_102_UNIFY_BACKEND_PATHWAYS | 2026-10-08 | 2026-10-08 | — | — |  |
-| active | AGENT_78_QUOTA_TELEMETRY_TRUTHFULNESS | 2026-08-17 | 2026-10-06 | — | — | STALE_15d |
+| active | AGENT_78_QUOTA_TELEMETRY_TRUTHFULNESS | 2026-08-17 | 2026-10-06 | — | — | STALE_16d |
 | ready | AGENT_105_CROSS_PROCESS_TURN_SIGNAL | 2026-10-09 | 2026-10-09 | — | — |  |
 | ready | AGENT_71_MESH_PER_NODE_CREDENTIALS | 2026-08-05 | 2026-08-05 | — | — |  |
 | ready | AGENT_93_QUOTA_DB_AUTO_PRUNING | 2026-10-01 | 2026-10-01 | — | — |  |

@@ -205,12 +205,18 @@ case "$cmd" in
         current="$(api GET /api/flags)"
         # Value carried as a JSON literal (true/false unchanged for bools) so numeric,
         # null and str values PUT back verbatim; tojson escapes tabs/newlines.
-        writable_pending="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == true and .source != "registry") | "\(.flag_name)\t\(.value | tojson)"')"
+        # A null effective value (e.g. no governor cap: env unset) is NOT pinned: an
+        # explicit null row would silently override a cap set in .env later.
+        writable_pending="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == true and .source != "registry" and .value != null) | "\(.flag_name)\t\(.value | tojson)"')"
+        unset_left="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == true and .source != "registry" and .value == null) | .flag_name')"
         skipped="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == false) | .flag_name')"
         already="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == true and .source == "registry") | .flag_name')"
 
         if [[ -n "$already" ]]; then
             echo "already in registry (skipping): $(echo "$already" | tr '\n' ' ')"
+        fi
+        if [[ -n "$unset_left" ]]; then
+            echo "no effective value (null), left unpinned on env/default: $(echo "$unset_left" | tr '\n' ' ')"
         fi
         if [[ -n "$skipped" ]]; then
             echo "not registry-writable, cannot migrate (bootstrap/worker-side, left on env/default): $(echo "$skipped" | tr '\n' ' ')"
@@ -229,6 +235,10 @@ case "$cmd" in
             got_src="$(echo "$resp" | jq -r '.flag.source')"
             if [[ "$got_src" == "registry" && "$got_val" == "$fval" ]]; then
                 echo "  OK    $fname -> $fval (registry)"
+            elif [[ "$(echo "$resp" | jq -r '.detail.reason // empty')" == "invalid_flag_value" ]]; then
+                # The env value is valid for env but not storable in the registry
+                # (e.g. a governor cap of 0, env's "no cap" spelling): leave it on env.
+                echo "  SKIP  $fname ($fval not storable: $(echo "$resp" | jq -r '.detail.message'); left on env)"
             else
                 echo "  FAIL  $fname (expected $fval, got value=$got_val source=$got_src)" >&2
                 fail=1

@@ -160,8 +160,8 @@ def test_put_reflected_in_health_null_wins_delete_falls_back(client, monkeypatch
     assert r.status_code == 200 and r.json()["flag"]["value"] is None
     assert db_mod.get_db().get_runtime_flag("CLAUDE_SDK_MAX_TURNS")["value"] == ""
     assert client.get("/health").json()["governor"]["sdk_max_turns"] is None
-    # Non-positive = no cap, same as the env convention.
-    assert _put(client, "CLAUDE_SDK_MAX_TURNS", 0).status_code == 200
+    # A rejected non-positive PUT leaves the explicit null in place.
+    assert _put(client, "CLAUDE_SDK_MAX_TURNS", 0).status_code == 422
     assert client.get("/health").json()["governor"]["sdk_max_turns"] is None
 
     d = client.delete("/api/flags/CLAUDE_SDK_MAX_TURNS", headers=_auth())
@@ -188,6 +188,35 @@ def test_wrong_typed_put_is_422_and_writes_nothing(client, flag, value):
     assert detail["reason"] == "invalid_flag_value"
     assert detail["value_type"] == db_mod.runtime_flag_value_type(flag)
     assert db_mod.get_db().get_runtime_flag(flag) is None
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [("CLAUDE_SDK_MAX_TURNS", 0), ("CLAUDE_SDK_MAX_TURNS", -1),
+     ("CLAUDE_SDK_MAX_BUDGET_USD", 0), ("CLAUDE_SDK_MAX_BUDGET_USD", 0.0),
+     ("CLAUDE_SDK_MAX_BUDGET_USD", -2.5)],
+)
+def test_governor_non_positive_put_is_422_null_is_the_only_no_cap(client, flag, value):
+    # A 0 must never be stored as a silent "unlimited" on a cost ceiling.
+    r = _put(client, flag, value)
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["reason"] == "invalid_flag_value"
+    assert "use null for no cap" in r.json()["detail"]["message"]
+    assert db_mod.get_db().get_runtime_flag(flag) is None
+
+
+def test_non_positive_registry_row_is_ignored_not_unlimited(monkeypatch):
+    # Only a direct DB write can bypass the PUT check; the resolver must still
+    # fall back to env rather than read it as "no cap".
+    import config as _config_pkg
+
+    monkeypatch.setattr(_config_pkg.config.claude, "sdk_max_budget_usd", 5.0, raising=False)
+    with db_mod.get_db()._write() as conn:
+        conn.execute(
+            "INSERT INTO runtime_flags(flag_name, value, source, set_at, set_by) VALUES (?, ?, ?, ?, ?)",
+            ("CLAUDE_SDK_MAX_BUDGET_USD", "0", "test", "2026-10-22T00:00:00Z", "test"),
+        )
+    assert db_mod.sdk_governor_ceilings()["sdk_max_budget_usd"] == 5.0
 
 
 def test_str_flag_round_trips_raw(client):
