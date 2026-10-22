@@ -385,6 +385,9 @@ class QuotaConfig:
     # this many days are pruned (boundary-FIRST rows are always kept).
     # 0 disables pruning entirely.
     snapshot_retention_days: int = 14       # QUOTA_SNAPSHOT_RETENTION_DAYS
+    # Bounded coordinator_events (A93): diagnostic events older than this many
+    # days are pruned daily. 0 disables event pruning.
+    event_retention_days: int = 14          # QUOTA_EVENT_RETENTION_DAYS
 
 class Config:
     """Main configuration class"""
@@ -709,6 +712,7 @@ class Config:
             ("QUOTA_PREWARM_CIRCUIT_COOLDOWN_SEC", "prewarm_circuit_cooldown_sec", 60),
             ("QUOTA_PREWARM_CIRCUIT_COOLDOWN_MAX_SEC", "prewarm_circuit_cooldown_max_sec", 60),
             ("QUOTA_SNAPSHOT_RETENTION_DAYS", "snapshot_retention_days", 0),
+            ("QUOTA_EVENT_RETENTION_DAYS", "event_retention_days", 0),
         ):
             try:
                 v = os.getenv(_env)

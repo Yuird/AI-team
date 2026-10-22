@@ -103,10 +103,24 @@ Gateway, task-server, local-execution gateway and tests never install a client �
   `quota_windows.db` stays: the prewarmer must decide from *this host's* Claude status line with
   no controller round-trip in the activation path, and the controller already receives the same
   observations via `/telemetry/quota-observation`. It is never read by the controller and is
-  rebuildable (delete ⇒ re-observed). Retention is **not bounded today** — tracked as A93
-  (`.ai/dispatch/AGENT_93_QUOTA_DB_AUTO_PRUNING.md`): the worker never runs `_prune_once_daily`
-  (prewarmer calls `observe_once()` directly), so snapshots date back to 2026-07-31, and
-  `coordinator_events` has no retention on either side (worker 225k rows / 120 MB).
+  rebuildable (delete ⇒ re-observed). **Retention is bounded (A93,
+  `.ai/dispatch/AGENT_93_QUOTA_DB_AUTO_PRUNING.md`).** Both quota stores run ONE daily seam,
+  `QuotaWindowCoordinator.prune_once_daily` (once per UTC day, best-effort, off the event loop):
+  the controller from the gateway coordinator's `_observe_loop` (built only when
+  `QUOTA_COORDINATOR_ENABLED` is on), the worker from its prewarmer tick (it never starts that loop).
+  Each pass deletes redundant `snapshots` older than `QUOTA_SNAPSHOT_RETENTION_DAYS` (14; the first
+  sighting of every boundary is always kept) and `coordinator_events` older than
+  `QUOTA_EVENT_RETENTION_DAYS` (14), in batches of 5,000 rows per write transaction.
+  `coordinator_events` has no code reader (the digest consumes events in memory), so its window
+  only serves operator forensics and matches the snapshot window. Only the worker cache reclaims
+  space: the first pass switches it to `auto_vacuum=INCREMENTAL` with one `VACUUM`, and later passes
+  run `PRAGMA incremental_vacuum`. The controller file is shared by gateway + task-server and is
+  never vacuumed: its freed pages are reused, not returned.
+  **Steady-state bound** (rows/day measured 2026-10-02 × 14 days, plus boundary-anchor snapshots,
+  which grow by one row per window boundary): controller events ≈ 5k/day → ≈ 70k rows;
+  worker events ≈ 1.4k/day → ≈ 20k rows; snapshots ≈ the last 14 days of observations per side.
+  The live 2026-10-02 backlog (worker 225k events, snapshots back to 2026-07-31) clears on the first
+  daily pass after the operator restarts the worker on merged code.
 - **R3:** §3.1. **R4:** live cutover is operator-gated (§6).
 
 ## 5. Migration / reconciliation
@@ -161,7 +175,7 @@ step 5) and the previous task-server image; the new routes are additive.
   not retried. Only when `DURABLE_RELAY_ENABLED` is on (OFF live 2026-10-02). Releasing the lock
   before the reconcile is deferred until A82 lands (A82 rewrites `_get_or_create`).
 - **Deferred:** shared-token auth until A71 (routes use the same dependency A71 wraps);
-  worker/controller `quota_windows.db` retention (A93); the `_http_target_is_colocated`
+  the `_http_target_is_colocated`
   heuristic is now inert for workers (no local sink) and is left in place; flags set only in the
   controller's env (no registry row) are invisible to workers — unchanged from before A88.
 

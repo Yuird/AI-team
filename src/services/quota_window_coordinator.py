@@ -53,6 +53,18 @@ _BOUNDARY_JITTER = timedelta(seconds=2)
 #: anchored-window evidence), as is everything newer than the cutoff.
 _SNAPSHOT_RETENTION_DAYS = 14
 
+#: ``coordinator_events`` retention (A93). The table is write-only diagnostics:
+#: no code path reads it back (the Telegram digest consumes events in memory via
+#: ``event_handlers``), so the window only has to cover operator forensics. It
+#: matches the snapshot window so every retained snapshot keeps its surrounding
+#: events. ``<= 0`` disables event pruning.
+_EVENT_RETENTION_DAYS = 14
+
+#: Rows removed per DELETE, each in its own short write transaction (A93): a
+#: first prune of a 225k-row backlog must not hold the SQLite write lock — the
+#: controller store is shared by the gateway and the task-server — for long.
+_PRUNE_BATCH_ROWS = 5000
+
 
 class WindowSemantics(Enum):
     ANCHORED = "anchored"
@@ -549,40 +561,110 @@ class QuotaWindowStore:
             )
         return stored
 
-    def prune_snapshots(self, *, retention_days: int = _SNAPSHOT_RETENTION_DAYS, now: Optional[datetime] = None) -> int:
+    def _delete_batched(self, sql: str, params: tuple, batch_rows: int) -> int:
+        """Run a ``... LIMIT ?`` DELETE repeatedly, one short write transaction
+        per batch, until a batch comes back short (A93). Bounds how long any one
+        statement holds the write lock; other writers interleave between batches."""
+        batch = max(1, int(batch_rows))
+        total = 0
+        while True:
+            with self._write() as conn:
+                removed = conn.execute(sql, (*params, batch)).rowcount
+            total += removed
+            if removed < batch:
+                return total
+
+    def prune_snapshots(
+        self,
+        *,
+        retention_days: int = _SNAPSHOT_RETENTION_DAYS,
+        now: Optional[datetime] = None,
+        batch_rows: int = _PRUNE_BATCH_ROWS,
+    ) -> int:
         """Bounded history (A78 §4): delete redundant confirmation snapshots
         older than the cutoff while ALWAYS keeping (a) everything newer than
         the cutoff and (b) the FIRST sighting of each window boundary — that
         row is the anchored-window evidence; losing it would falsify
         classification. ``retention_days <= 0`` disables pruning entirely.
-        Returns the number of rows removed."""
+        Deletes in batches of ``batch_rows`` (A93). Returns the number of rows
+        removed."""
         if retention_days is None or int(retention_days) <= 0:
             return 0
         cutoff = utc_iso((normalize_utc(now) or utc_now()) - timedelta(days=int(retention_days)))
-        with self._write() as conn:
-            # Anchors (first sighting per provider/principal/bucket/reset_at boundary)
-            # computed in one pass via ROW_NUMBER(), then excluded from the delete.
-            # A per-row correlated EXISTS subquery here previously re-scanned each
-            # row's whole bucket once per candidate row (near-quadratic on this
-            # table); this is a single sort + scan instead.
-            cur = conn.execute(
-                """
-                DELETE FROM snapshots WHERE observed_at < ?
-                  AND snapshot_id NOT IN (
-                    SELECT snapshot_id FROM (
-                      SELECT snapshot_id,
-                             ROW_NUMBER() OVER (
-                               PARTITION BY provider, principal_hash, bucket_id, reset_at
-                               ORDER BY observed_at ASC, created_at ASC
-                             ) AS rn
-                      FROM snapshots
-                    )
-                    WHERE rn = 1
+        # Anchors (first sighting per provider/principal/bucket/reset_at boundary)
+        # computed in one pass via ROW_NUMBER(), then excluded from the delete.
+        # A per-row correlated EXISTS subquery here previously re-scanned each
+        # row's whole bucket once per candidate row (near-quadratic on this
+        # table); this is a single sort + scan instead. Deleting non-anchor rows
+        # never changes which row is an anchor, so recomputing per batch is safe.
+        return self._delete_batched(
+            """
+            DELETE FROM snapshots WHERE snapshot_id IN (
+              SELECT snapshot_id FROM snapshots WHERE observed_at < ?
+                AND snapshot_id NOT IN (
+                  SELECT snapshot_id FROM (
+                    SELECT snapshot_id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY provider, principal_hash, bucket_id, reset_at
+                             ORDER BY observed_at ASC, created_at ASC
+                           ) AS rn
+                    FROM snapshots
                   )
-                """,
-                (cutoff,),
+                  WHERE rn = 1
+                )
+              LIMIT ?
             )
-            return cur.rowcount
+            """,
+            (cutoff,),
+            batch_rows,
+        )
+
+    def prune_events(
+        self,
+        *,
+        retention_days: int = _EVENT_RETENTION_DAYS,
+        now: Optional[datetime] = None,
+        batch_rows: int = _PRUNE_BATCH_ROWS,
+    ) -> int:
+        """Bounded ``coordinator_events`` (A93): delete events older than the
+        cutoff, oldest ``id`` first, in batches of ``batch_rows``. Rows stamped
+        in the future (clock skew) simply survive until they age out.
+        ``retention_days <= 0`` disables it. Returns the number of rows removed."""
+        if retention_days is None or int(retention_days) <= 0:
+            return 0
+        cutoff = utc_iso((normalize_utc(now) or utc_now()) - timedelta(days=int(retention_days)))
+        return self._delete_batched(
+            """
+            DELETE FROM coordinator_events WHERE id IN (
+              SELECT id FROM coordinator_events WHERE created_at < ? ORDER BY id LIMIT ?
+            )
+            """,
+            (cutoff,),
+            batch_rows,
+        )
+
+    def reclaim_space(self) -> str:
+        """Return pages freed by pruning to the OS (A93). For a store only this
+        process uses (the worker-local cache): a blocking ``VACUUM`` would stall
+        the gateway/task-server that share the controller store.
+
+        A store still at ``auto_vacuum=NONE`` is switched to INCREMENTAL, which
+        needs one full ``VACUUM`` (sized by what survived the prune); after that
+        each call is a cheap ``PRAGMA incremental_vacuum`` over the day's freed
+        pages. The WAL is truncated afterwards so the rewrite does not linger in
+        the ``-wal`` file. Returns ``"vacuum"`` or ``"incremental"``."""
+        conn = self._conn()
+        with self._write_lock:
+            if conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+                conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                conn.execute("VACUUM")
+                mode = "vacuum"
+            else:
+                # fetchall(): the pragma frees one page per step.
+                conn.execute("PRAGMA incremental_vacuum").fetchall()
+                mode = "incremental"
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        return mode
 
     def set_adapter_status(self, status: QuotaAdapterStatus) -> None:
         checked = utc_iso(status.last_checked_at or utc_now())
@@ -1349,6 +1431,8 @@ class QuotaWindowCoordinator:
         now: Callable[[], datetime] = utc_now,
         event_handlers: Optional[Iterable[QuotaEventHandler]] = None,
         snapshot_retention_days: int = _SNAPSHOT_RETENTION_DAYS,
+        event_retention_days: int = _EVENT_RETENTION_DAYS,
+        reclaim_space: bool = False,
     ) -> None:
         self.store = store
         self.adapters = list(adapters)
@@ -1358,6 +1442,9 @@ class QuotaWindowCoordinator:
         self.reset_probe_lead_sec = max(0, int(reset_probe_lead_sec))
         self.expected_schema_versions = expected_schema_versions or {}
         self.snapshot_retention_days = int(snapshot_retention_days)
+        self.event_retention_days = int(event_retention_days)
+        #: Only for a store this process owns alone (the worker-local cache).
+        self.reclaim_space = bool(reclaim_space)
         self._now = now
         self._event_handlers = list(event_handlers or [])
         self._task: Optional[asyncio.Task] = None
@@ -1408,26 +1495,37 @@ class QuotaWindowCoordinator:
         try:
             while True:
                 await self.observe_once()
-                await self._prune_once_daily()
+                await self.prune_once_daily()
                 await asyncio.sleep(self.next_observe_delay_sec())
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.warning("quota_observe_loop_stopped err=%s", e)
 
-    async def _prune_once_daily(self) -> None:
-        """Bounded history (A78 §4): prune redundant old snapshots at most once
-        per UTC day, best-effort — a failed prune must never kill the loop.
-        Runs off the event loop thread: the DELETE can scan tens of thousands
-        of rows and must never block heartbeats/HTTP handling while it runs."""
+    async def prune_once_daily(self) -> None:
+        """Bounded history (A78 §4, A93): prune redundant old snapshots and old
+        ``coordinator_events`` at most once per UTC day, best-effort — a failed
+        prune must never kill the loop. The ONE retention seam: driven by
+        ``_observe_loop`` on the controller and by the prewarmer's tick on the
+        worker (which never starts this loop). Runs off the event loop thread:
+        the DELETEs can scan tens of thousands of rows and must never block
+        heartbeats/HTTP handling while they run."""
         try:
             today = utc_iso(self._now())[:10]
-            if self._last_prune_day == today or self.snapshot_retention_days <= 0:
+            if self._last_prune_day == today:
+                return
+            if self.snapshot_retention_days <= 0 and self.event_retention_days <= 0:
                 return
             pruned = await asyncio.to_thread(self.store.prune_snapshots, retention_days=self.snapshot_retention_days)
-            self._last_prune_day = today
             if pruned:
                 logger.info("event=quota_snapshots_pruned rows=%d retention_days=%d", pruned, self.snapshot_retention_days)
+            events = await asyncio.to_thread(self.store.prune_events, retention_days=self.event_retention_days)
+            if events:
+                logger.info("event=quota_events_pruned rows=%d retention_days=%d", events, self.event_retention_days)
+            self._last_prune_day = today
+            if self.reclaim_space and (pruned or events):
+                mode = await asyncio.to_thread(self.store.reclaim_space)
+                logger.info("event=quota_store_space_reclaimed mode=%s", mode)
         except Exception as e:
             logger.warning("event=quota_snapshot_prune_failed err=%s", e)
 
@@ -1650,6 +1748,7 @@ def build_quota_coordinator_from_config(
     enabled: Optional[bool] = None,
     event_handlers: Optional[Iterable[QuotaEventHandler]] = None,
     observe_locally: bool = True,
+    reclaim_space: bool = False,
 ) -> QuotaWindowCoordinator:
     """Build the coordinator from config.
 
@@ -1661,6 +1760,9 @@ def build_quota_coordinator_from_config(
     to ``/telemetry/quota-observation``, which writes the same store this
     coordinator reads. A single-process/local-execution host keeps
     ``observe_locally=True`` for byte-identical legacy behaviour.
+
+    ``reclaim_space`` returns pruned pages to the OS after the daily prune; pass
+    it only for a store no other process opens (the worker-local cache, A93).
     """
     from config import config
 
@@ -1671,6 +1773,7 @@ def build_quota_coordinator_from_config(
     max_interval = int(getattr(quota_cfg, "observe_max_interval_sec", 21600))
     lead = int(getattr(quota_cfg, "reset_probe_lead_sec", 900))
     retention = int(getattr(quota_cfg, "snapshot_retention_days", _SNAPSHOT_RETENTION_DAYS))
+    event_retention = int(getattr(quota_cfg, "event_retention_days", _EVENT_RETENTION_DAYS))
     adapters = build_default_quota_adapters() if observe_locally else []
     return QuotaWindowCoordinator(
         store=QuotaWindowStore(db_path),
@@ -1681,6 +1784,8 @@ def build_quota_coordinator_from_config(
         reset_probe_lead_sec=lead,
         event_handlers=event_handlers,
         snapshot_retention_days=retention,
+        event_retention_days=event_retention,
+        reclaim_space=reclaim_space,
     )
 
 

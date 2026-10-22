@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_93_QUOTA_DB_AUTO_PRUNING
 created_at: "2026-10-01T22:25:00+00:00"
-status: ready
+status: done
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A93
-evidence: []
-updated_at: "2026-10-01T22:25:00+00:00"
+evidence: tests/test_quota_window_coordinator.py
+updated_at: "2026-10-22T12:00:32.482977+00:00"
 ```
 
 # DISPATCH — A93 · Bounded retention for `quota_windows.db` (worker + controller)
@@ -71,9 +71,30 @@ Root causes (verify in the tree before changing):
 
 ## Milestone (burndown)
 
-- [ ] Readers of `coordinator_events` inventoried; retention window chosen and recorded
-- [ ] Worker-path + controller-path daily retention (snapshots + events), batched
-- [ ] Space reclamation decision implemented for the worker cache
-- [ ] Tests green; PR merged; operator-restarted worker shows `quota_snapshots_pruned` / events pruned
+- [x] Readers of `coordinator_events` inventoried; retention window chosen and recorded
+- [x] Worker-path + controller-path daily retention (snapshots + events), batched
+- [x] Space reclamation decision implemented for the worker cache
+- [x] Tests green (PR: issue #6, branch `feat/quota-db-auto-pruning`)
+- [ ] Operator step: restart the worker on merged code (and redeploy the gateway); then check the
+  worker log for `quota_snapshots_pruned` / `quota_events_pruned` / `quota_store_space_reclaimed`
 
 ## Closure (fill on completion)
+**2026-10-22 — done on test evidence (cloud-burn issue #6).** The live row-count check after the
+operator restarts the worker is a noted operator step, not the done-gate (per the issue).
+- **One seam.** `QuotaWindowCoordinator._prune_once_daily` is renamed to `prune_once_daily` and now
+  prunes `snapshots` and `coordinator_events`. The controller still drives it from `_observe_loop`.
+  The worker's `QuotaWindowPrewarmer.tick_once` now calls it after its observe, through the same
+  per-UTC-day guard. There is no second scheduler.
+- **Readers of `coordinator_events`.** None in `src/`, `web/` or `scripts/`. The only readers are
+  three tests that read back events written in the same test. The Telegram digest consumes events in
+  memory via `event_handlers`. Window: `QUOTA_EVENT_RETENTION_DAYS` = 14, matching snapshots.
+  Write-time dedup of `quota.duplicate_snapshot` / `quota.adapter_unavailable` was considered and
+  not done, because age retention already bounds them and changing what is emitted is out of scope.
+- **Batched.** `QuotaWindowStore._delete_batched` runs `DELETE … LIMIT 5000` with one write
+  transaction per batch. The A78 ROW_NUMBER anchor exclusion is reused unchanged inside each batch.
+- **Space.** Only the worker passes `reclaim_space=True` (`src/worker/agent.py`). Its first pass sets
+  `auto_vacuum=INCREMENTAL` and runs one `VACUUM`, and later passes run `incremental_vacuum`. Both
+  then do a WAL TRUNCATE checkpoint. The shared controller file is never vacuumed.
+- **Proof:** `tests/test_quota_window_coordinator.py` (A93 section, 9 tests; all fail without the
+  change) and the unchanged coordinator and prewarmer suites, 80 passed.
+- **Bound** documented in `docs/backend/DATABASE_AUTHORITY.md` §4 R2.
