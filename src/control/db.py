@@ -521,7 +521,7 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         ),
     },
     # [A62] SDK-driver governor ceilings (M3.3/A53). R1: read where the SDK driver
-    # creates an SDK session process (``ClaudeSDKDriver._get_or_create``) — on the
+    # creates an SDK session process (``ClaudeSDKClientDriver._get_or_create``) — on the
     # worker via the A88 controller snapshot — so a write reaches the next session
     # process with no restart; a running process keeps the ceilings it booted with.
     "CLAUDE_SDK_MAX_TURNS": {
