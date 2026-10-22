@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_93_QUOTA_DB_AUTO_PRUNING
 created_at: "2026-10-01T22:25:00+00:00"
-status: done
+status: active
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A93
 evidence: tests/test_quota_window_coordinator.py
-updated_at: "2026-10-22T12:00:32.482977+00:00"
+updated_at: "2026-10-22T18:00:52.949035+00:00"
 ```
 
 # DISPATCH — A93 · Bounded retention for `quota_windows.db` (worker + controller)
@@ -75,12 +75,27 @@ Root causes (verify in the tree before changing):
 - [x] Worker-path + controller-path daily retention (snapshots + events), batched
 - [x] Space reclamation decision implemented for the worker cache
 - [x] Tests green (PR: issue #6, branch `feat/quota-db-auto-pruning`)
+- [x] Owner amendment (PR #22 review, 2026-10-22): archive to `quota_archive.db` before every delete
+- [ ] PR #22 merged (A93 stays `active` until then, per the review)
+- [ ] Operator step, BEFORE the worker restart: `sqlite3 state/quota_windows.db ".backup state/quota_windows.pre-a93.db"`
+  then `gzip state/quota_windows.pre-a93.db` on the worker host
 - [ ] Operator step: restart the worker on merged code (and redeploy the gateway); then check the
   worker log for `quota_snapshots_pruned` / `quota_events_pruned` / `quota_store_space_reclaimed`
+  and that `state/quota_archive.db` holds the pre-cutoff history
 
 ## Closure (fill on completion)
-**2026-10-22 — done on test evidence (cloud-burn issue #6).** The live row-count check after the
-operator restarts the worker is a noted operator step, not the done-gate (per the issue).
+**2026-10-22 — implementation complete on PR #22; `active` until it merges.** The first version was
+reviewed PASS, then the owner amended the scope: history must be archived before it is pruned. The
+live row-count check after the operator restarts the worker is a noted operator step, not the
+done-gate (per the issue).
+- **Archive before delete (amendment).** `QuotaArchive` writes `quota_archive.db` next to the store:
+  `snapshots_archive` (full fidelity, `INSERT OR IGNORE` on `snapshot_id`) and `event_runs`
+  (consecutive identical events compacted; counts and timing lossless; the watermark `MAX(last_id)` is
+  read inside the archive's write transaction, so retries and concurrent passes never double-count).
+  Each batch is archived, then deleted. If archiving fails, the batch is not deleted,
+  `event=quota_archive_failed` is logged, and the day stays unmarked so the pass retries.
+  `QUOTA_ARCHIVE_ENABLED` defaults to on. With it off, behaviour is the pre-amendment one and no
+  archive file is created. The archive is never pruned.
 - **One seam.** `QuotaWindowCoordinator._prune_once_daily` is renamed to `prune_once_daily` and now
   prunes `snapshots` and `coordinator_events`. The controller still drives it from `_observe_loop`.
   The worker's `QuotaWindowPrewarmer.tick_once` now calls it after its observe, through the same
@@ -95,6 +110,7 @@ operator restarts the worker is a noted operator step, not the done-gate (per th
 - **Space.** Only the worker passes `reclaim_space=True` (`src/worker/agent.py`). Its first pass sets
   `auto_vacuum=INCREMENTAL` and runs one `VACUUM`, and later passes run `incremental_vacuum`. Both
   then do a WAL TRUNCATE checkpoint. The shared controller file is never vacuumed.
-- **Proof:** `tests/test_quota_window_coordinator.py` (A93 section, 9 tests; all fail without the
-  change) and the unchanged coordinator and prewarmer suites, 80 passed.
+- **Proof:** `tests/test_quota_window_coordinator.py`: the A93 section (9 tests) and the archive
+  section (7 tests, including an 80-day backfill), all failing without the change; with the
+  unchanged coordinator and prewarmer suites, 87 passed.
 - **Bound** documented in `docs/backend/DATABASE_AUTHORITY.md` §4 R2.

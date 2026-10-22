@@ -388,6 +388,10 @@ class QuotaConfig:
     # Bounded coordinator_events (A93): diagnostic events older than this many
     # days are pruned daily. 0 disables event pruning.
     event_retention_days: int = 14          # QUOTA_EVENT_RETENTION_DAYS
+    # Append-only history (A93): pruned snapshots and compacted event runs are
+    # copied to quota_archive.db (next to db_path) before deletion; a failed
+    # archive deletes nothing. Default ON — archiving only adds data.
+    archive_enabled: bool = True            # QUOTA_ARCHIVE_ENABLED
 
 class Config:
     """Main configuration class"""
@@ -748,6 +752,12 @@ class Config:
             v = os.getenv("CLAUDE_QUOTA_PRINCIPAL_KEY")
             if v:
                 self.quota.claude_principal_key = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("QUOTA_ARCHIVE_ENABLED")
+            if v is not None:
+                self.quota.archive_enabled = v.lower() in ("1", "true", "yes", "on")
         except Exception:
             pass
         try:

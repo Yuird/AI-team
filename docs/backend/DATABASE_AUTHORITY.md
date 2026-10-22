@@ -102,12 +102,15 @@ Gateway, task-server, local-execution gateway and tests never install a client �
 - **R2 (worker-local durable state):** only the classified W/P items above. The worker
   `quota_windows.db` stays: the prewarmer must decide from *this host's* Claude status line with
   no controller round-trip in the activation path, and the controller already receives the same
-  observations via `/telemetry/quota-observation`. It is never read by the controller and is
-  rebuildable (delete ⇒ re-observed). **Retention is bounded (A93,
+  observations via `/telemetry/quota-observation`. It is never read by the controller, and its
+  *current window state* is rebuildable (delete ⇒ re-observed); its *history* is not, so that is
+  archived before it is pruned (below). **Retention is bounded (A93,
   `.ai/dispatch/AGENT_93_QUOTA_DB_AUTO_PRUNING.md`).** Both quota stores run ONE daily seam,
   `QuotaWindowCoordinator.prune_once_daily` (once per UTC day, best-effort, off the event loop):
-  the controller from the gateway coordinator's `_observe_loop` (built only when
-  `QUOTA_COORDINATOR_ENABLED` is on), the worker from its prewarmer tick (it never starts that loop).
+  the controller from the gateway coordinator's `_observe_loop`, the worker from its prewarmer
+  tick (it never starts that loop). **The controller loop is built only when
+  `QUOTA_COORDINATOR_ENABLED` is on; with it off the task-server's `/telemetry/quota-observation`
+  ingest still writes the controller store and nothing prunes it** (unbounded, as before A93).
   Each pass deletes redundant `snapshots` older than `QUOTA_SNAPSHOT_RETENTION_DAYS` (14; the first
   sighting of every boundary is always kept) and `coordinator_events` older than
   `QUOTA_EVENT_RETENTION_DAYS` (14), in batches of 5,000 rows per write transaction.
@@ -119,8 +122,51 @@ Gateway, task-server, local-execution gateway and tests never install a client �
   **Steady-state bound** (rows/day measured 2026-10-02 × 14 days, plus boundary-anchor snapshots,
   which grow by one row per window boundary): controller events ≈ 5k/day → ≈ 70k rows;
   worker events ≈ 1.4k/day → ≈ 20k rows; snapshots ≈ the last 14 days of observations per side.
-  The live 2026-10-02 backlog (worker 225k events, snapshots back to 2026-07-31) clears on the first
-  daily pass after the operator restarts the worker on merged code.
+  The live 2026-10-02 backlog (worker 225k events, snapshots back to 2026-07-31) moves to the archive
+  on the first daily pass after the operator restarts the worker on merged code.
+  **History archive (`quota_archive.db`, next to each `quota_windows.db`; `QUOTA_ARCHIVE_ENABLED`,
+  default on).** Every prune batch is copied there *before* it is deleted. If the copy fails, that
+  batch and the rest of the pass delete nothing (`event=quota_archive_failed`) and the next tick
+  retries. Two append-only tables:
+  `snapshots_archive` holds pruned snapshots column-for-column, keyed on `snapshot_id`. Boundary
+  anchors never leave the live store, so the full series is the archive plus the live `snapshots`.
+  `event_runs` compacts pruned `coordinator_events`: each run of consecutive (by `id`) events with the
+  same `(event_name, provider, principal_hash, bucket_id, reason)` becomes one row with
+  `first_id`/`last_id`, `first_at`/`last_at`, `count` and first/last payload. This is lossless for
+  timing and counts, and a singleton such as `quota.refusal_recorded` keeps its payload. The
+  archive takes the contiguous `id` prefix older than the cutoff, so a row stamped in the future by
+  clock skew holds back the rows after it until it ages out.
+  **The archive is not a cache and is never pruned or vacuumed.** Expected size (estimated, not
+  measured): the 2.5-month worker backlog is about 31k snapshot rows plus a few thousand event runs
+  (its 193k noise events are long identical runs), so a few MB. Growth is about 500 snapshot
+  rows/day per side, or roughly 30–40 MB/year. With the flag off, pruning deletes without archiving.
+  **Correlating quota burn with sessions.** Copy the archive next to the controller's `mesh.db`
+  (each side's archive lives on its own host) and run from `sqlite3 mesh.db`:
+  ```sql
+  ATTACH DATABASE 'quota_archive.db' AS qa;
+  WITH sessions AS (
+    SELECT session_id,
+           MIN(julianday(event_time)) AS started, MAX(julianday(event_time)) AS ended
+    FROM llm_events WHERE session_id IS NOT NULL
+    GROUP BY session_id
+  )
+  SELECT s.session_id,
+         datetime(s.started) AS started_at, datetime(s.ended) AS ended_at,
+         q.principal_hash, q.reset_at AS window_reset_at,
+         MAX(q.used_percent) - MIN(q.used_percent) AS five_hour_pct_burned,
+         COUNT(*) AS readings
+  FROM sessions s
+  JOIN qa.snapshots_archive q
+    ON q.bucket_id = 'five_hour'
+   AND q.used_percent IS NOT NULL
+   AND julianday(q.observed_at) BETWEEN s.started - 15/1440.0 AND s.ended + 15/1440.0
+  GROUP BY s.session_id, q.principal_hash, q.reset_at
+  ORDER BY s.started;
+  ```
+  `julianday()` normalises the `…Z` and `…+00:00` stamp forms. The ±15 min pad catches the
+  readings either side of a session. Grouping by `reset_at` keeps a window rollover from reading
+  as negative burn. Replace `qa.snapshots_archive` with a `UNION ALL` of it and the live store's
+  `snapshots` to cover the last 14 days.
 - **R3:** §3.1. **R4:** live cutover is operator-gated (§6).
 
 ## 5. Migration / reconciliation

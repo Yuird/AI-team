@@ -65,6 +65,12 @@ _EVENT_RETENTION_DAYS = 14
 #: controller store is shared by the gateway and the task-server — for long.
 _PRUNE_BATCH_ROWS = 5000
 
+#: Append-only quota history (A93, owner amendment on PR #22): every row the
+#: retention pass removes is first archived here, next to ``quota_windows.db``.
+#: Unlike the store this is NOT a cache — past ``used_percent`` series cannot be
+#: re-observed — so it is never pruned.
+_ARCHIVE_FILENAME = "quota_archive.db"
+
 
 class WindowSemantics(Enum):
     ANCHORED = "anchored"
@@ -336,6 +342,175 @@ CREATE TABLE IF NOT EXISTS coordinator_events (
 """
 
 
+#: Snapshots the retention pass may remove: older than the cutoff and not the
+#: FIRST sighting of their window boundary. Anchors are computed in one pass via
+#: ROW_NUMBER() and excluded; a per-row correlated EXISTS subquery here once
+#: re-scanned each row's whole bucket per candidate (near-quadratic on this
+#: table). Deleting non-anchor rows never changes which row is an anchor, so
+#: recomputing it per batch is safe. Params: (cutoff, batch_rows).
+_PRUNABLE_SNAPSHOT_IDS_SQL = """
+    SELECT snapshot_id FROM snapshots WHERE observed_at < ?
+      AND snapshot_id NOT IN (
+        SELECT snapshot_id FROM (
+          SELECT snapshot_id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY provider, principal_hash, bucket_id, reset_at
+                   ORDER BY observed_at ASC, created_at ASC
+                 ) AS rn
+          FROM snapshots
+        )
+        WHERE rn = 1
+      )
+    LIMIT ?
+"""
+
+_ARCHIVE_DDL = """
+CREATE TABLE IF NOT EXISTS snapshots_archive (
+    snapshot_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    principal_hash TEXT NOT NULL,
+    bucket_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    telemetry_quality TEXT NOT NULL,
+    used_percent REAL,
+    reset_at TEXT,
+    limit_reached INTEGER,
+    window_duration_seconds INTEGER,
+    raw_status TEXT NOT NULL DEFAULT '',
+    unavailable_reason TEXT NOT NULL DEFAULT '',
+    active_session_state TEXT,
+    created_at TEXT NOT NULL,
+    archived_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_archive_bucket_observed
+    ON snapshots_archive(provider, principal_hash, bucket_id, observed_at);
+
+CREATE TABLE IF NOT EXISTS event_runs (
+    first_id INTEGER PRIMARY KEY,
+    last_id INTEGER NOT NULL,
+    event_name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    principal_hash TEXT NOT NULL,
+    bucket_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    first_at TEXT NOT NULL,
+    last_at TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    first_payload TEXT NOT NULL,
+    last_payload TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_runs_name_first_at
+    ON event_runs(event_name, first_at);
+"""
+
+_SNAPSHOT_COLUMNS = (
+    "snapshot_id", "provider", "principal_hash", "bucket_id", "observed_at",
+    "telemetry_quality", "used_percent", "reset_at", "limit_reached",
+    "window_duration_seconds", "raw_status", "unavailable_reason",
+    "active_session_state", "created_at",
+)
+
+
+class QuotaArchiveError(RuntimeError):
+    """Archiving a prune batch failed; that batch was NOT deleted (A93)."""
+
+
+class QuotaArchive:
+    """Append-only quota history next to the store (A93).
+
+    ``snapshots_archive`` keeps pruned snapshots at full fidelity, keyed on
+    ``snapshot_id`` (idempotent). ``event_runs`` compacts pruned
+    ``coordinator_events``: each run of consecutive (by ``id``) events with the
+    same ``(event_name, provider, principal_hash, bucket_id, reason)`` is one
+    row carrying its id range, first/last time, count and first/last payload —
+    lossless for timing and counts, and a singleton (a refusal) keeps its
+    payload. Short-lived connections: it is written once per prune batch."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+
+    @contextmanager
+    def _write(self) -> Generator[sqlite3.Connection, None, None]:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self._path), isolation_level=None, timeout=5.0)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.executescript(_ARCHIVE_DDL)
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                yield conn
+                conn.execute("COMMIT;")
+            except Exception:
+                conn.execute("ROLLBACK;")
+                raise
+        finally:
+            conn.close()
+
+    def archive_snapshots(self, rows: List[Dict[str, Any]]) -> None:
+        archived_at = utc_iso(utc_now())
+        cols = ", ".join(_SNAPSHOT_COLUMNS)
+        marks = ", ".join("?" for _ in _SNAPSHOT_COLUMNS)
+        with self._write() as conn:
+            conn.executemany(
+                f"INSERT OR IGNORE INTO snapshots_archive({cols}, archived_at) VALUES ({marks}, ?)",
+                [tuple(r.get(c) for c in _SNAPSHOT_COLUMNS) + (archived_at,) for r in rows],
+            )
+
+    def archive_events(self, rows: List[Dict[str, Any]]) -> None:
+        """Fold id-ordered ``rows`` into ``event_runs``. The watermark
+        (``MAX(last_id)``) is read inside the write transaction, so a retried or
+        concurrent pass never counts an event twice; the newest run is extended
+        when the next event continues it."""
+
+        def key(r: Dict[str, Any]) -> tuple:
+            return (r["event_name"], r["provider"], r["principal_hash"], r["bucket_id"], r["reason"])
+
+        with self._write() as conn:
+            last = conn.execute("SELECT * FROM event_runs ORDER BY last_id DESC LIMIT 1").fetchone()
+            watermark = int(last["last_id"]) if last else 0
+            current: Optional[Dict[str, Any]] = dict(last) if last else None
+            is_new = False
+            dirty: List[tuple[Dict[str, Any], bool]] = []
+            for r in sorted(rows, key=lambda row: row["id"]):
+                if int(r["id"]) <= watermark:
+                    continue
+                if current is not None and key(current) == key(r):
+                    current.update(last_id=r["id"], last_at=r["created_at"], last_payload=r["payload"])
+                    current["count"] = int(current["count"]) + 1
+                else:
+                    if current is not None:
+                        dirty.append((current, is_new))
+                    current = {
+                        "first_id": r["id"], "last_id": r["id"], "event_name": r["event_name"],
+                        "provider": r["provider"], "principal_hash": r["principal_hash"],
+                        "bucket_id": r["bucket_id"], "reason": r["reason"],
+                        "first_at": r["created_at"], "last_at": r["created_at"], "count": 1,
+                        "first_payload": r["payload"], "last_payload": r["payload"],
+                    }
+                    is_new = True
+            if current is not None:
+                dirty.append((current, is_new))
+            for run, new in dirty:
+                if new:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO event_runs(first_id, last_id, event_name, provider,"
+                        " principal_hash, bucket_id, reason, first_at, last_at, count, first_payload,"
+                        " last_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (run["first_id"], run["last_id"], run["event_name"], run["provider"],
+                         run["principal_hash"], run["bucket_id"], run["reason"], run["first_at"],
+                         run["last_at"], run["count"], run["first_payload"], run["last_payload"]),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE event_runs SET last_id = ?, last_at = ?, count = ?, last_payload = ?"
+                        " WHERE first_id = ?",
+                        (run["last_id"], run["last_at"], run["count"], run["last_payload"], run["first_id"]),
+                    )
+
+
 class QuotaWindowStore:
     def __init__(self, db_path: str | Path) -> None:
         self._path = Path(db_path)
@@ -574,50 +749,66 @@ class QuotaWindowStore:
             if removed < batch:
                 return total
 
+    @property
+    def archive_path(self) -> Path:
+        """The append-only history archive that sits next to this store (A93)."""
+        return self._path.with_name(_ARCHIVE_FILENAME)
+
+    def _archive_batch(self, write: Callable[["QuotaArchive"], None]) -> None:
+        """Archive one prune batch BEFORE it is deleted. Any failure raises
+        ``QuotaArchiveError`` so the caller deletes nothing."""
+        try:
+            write(QuotaArchive(self.archive_path))
+        except Exception as exc:
+            raise QuotaArchiveError(f"{type(exc).__name__}: {exc}") from exc
+
     def prune_snapshots(
         self,
         *,
         retention_days: int = _SNAPSHOT_RETENTION_DAYS,
         now: Optional[datetime] = None,
         batch_rows: int = _PRUNE_BATCH_ROWS,
+        archive: bool = False,
     ) -> int:
         """Bounded history (A78 §4): delete redundant confirmation snapshots
         older than the cutoff while ALWAYS keeping (a) everything newer than
         the cutoff and (b) the FIRST sighting of each window boundary — that
         row is the anchored-window evidence; losing it would falsify
         classification. ``retention_days <= 0`` disables pruning entirely.
-        Deletes in batches of ``batch_rows`` (A93). Returns the number of rows
-        removed."""
+        Deletes in batches of ``batch_rows`` (A93). With ``archive`` each batch
+        is first copied, full-fidelity, into ``snapshots_archive``; if that copy
+        fails the batch is not deleted (``QuotaArchiveError``). Returns the
+        number of rows removed."""
         if retention_days is None or int(retention_days) <= 0:
             return 0
         cutoff = utc_iso((normalize_utc(now) or utc_now()) - timedelta(days=int(retention_days)))
-        # Anchors (first sighting per provider/principal/bucket/reset_at boundary)
-        # computed in one pass via ROW_NUMBER(), then excluded from the delete.
-        # A per-row correlated EXISTS subquery here previously re-scanned each
-        # row's whole bucket once per candidate row (near-quadratic on this
-        # table); this is a single sort + scan instead. Deleting non-anchor rows
-        # never changes which row is an anchor, so recomputing per batch is safe.
-        return self._delete_batched(
-            """
-            DELETE FROM snapshots WHERE snapshot_id IN (
-              SELECT snapshot_id FROM snapshots WHERE observed_at < ?
-                AND snapshot_id NOT IN (
-                  SELECT snapshot_id FROM (
-                    SELECT snapshot_id,
-                           ROW_NUMBER() OVER (
-                             PARTITION BY provider, principal_hash, bucket_id, reset_at
-                             ORDER BY observed_at ASC, created_at ASC
-                           ) AS rn
-                    FROM snapshots
-                  )
-                  WHERE rn = 1
-                )
-              LIMIT ?
+        if not archive:
+            return self._delete_batched(
+                f"DELETE FROM snapshots WHERE snapshot_id IN ({_PRUNABLE_SNAPSHOT_IDS_SQL})",
+                (cutoff,),
+                batch_rows,
             )
-            """,
-            (cutoff,),
-            batch_rows,
-        )
+        batch = max(1, int(batch_rows))
+        total = 0
+        while True:
+            rows = [
+                dict(r) for r in self._conn().execute(
+                    f"SELECT * FROM snapshots WHERE snapshot_id IN ({_PRUNABLE_SNAPSHOT_IDS_SQL})",
+                    (cutoff, batch),
+                ).fetchall()
+            ]
+            if not rows:
+                return total
+            self._archive_batch(lambda a: a.archive_snapshots(rows))
+            with self._write() as conn:
+                before = conn.total_changes
+                conn.executemany(
+                    "DELETE FROM snapshots WHERE snapshot_id = ?",
+                    [(r["snapshot_id"],) for r in rows],
+                )
+                total += conn.total_changes - before
+            if len(rows) < batch:
+                return total
 
     def prune_events(
         self,
@@ -625,23 +816,59 @@ class QuotaWindowStore:
         retention_days: int = _EVENT_RETENTION_DAYS,
         now: Optional[datetime] = None,
         batch_rows: int = _PRUNE_BATCH_ROWS,
+        archive: bool = False,
     ) -> int:
         """Bounded ``coordinator_events`` (A93): delete events older than the
         cutoff, oldest ``id`` first, in batches of ``batch_rows``. Rows stamped
         in the future (clock skew) simply survive until they age out.
-        ``retention_days <= 0`` disables it. Returns the number of rows removed."""
+        ``retention_days <= 0`` disables it. Returns the number of rows removed.
+
+        With ``archive`` each batch is first compacted into ``event_runs`` and
+        only then deleted (a failed archive raises ``QuotaArchiveError`` and
+        deletes nothing). Archiving takes the contiguous ``id`` prefix older
+        than the cutoff — it stops at the first row that is not yet old — so
+        "consecutive identical events" means consecutive in the original table,
+        and a run can be continued exactly across batches and passes."""
         if retention_days is None or int(retention_days) <= 0:
             return 0
         cutoff = utc_iso((normalize_utc(now) or utc_now()) - timedelta(days=int(retention_days)))
-        return self._delete_batched(
-            """
-            DELETE FROM coordinator_events WHERE id IN (
-              SELECT id FROM coordinator_events WHERE created_at < ? ORDER BY id LIMIT ?
+        if not archive:
+            return self._delete_batched(
+                """
+                DELETE FROM coordinator_events WHERE id IN (
+                  SELECT id FROM coordinator_events WHERE created_at < ? ORDER BY id LIMIT ?
+                )
+                """,
+                (cutoff,),
+                batch_rows,
             )
-            """,
+        first_young = self._conn().execute(
+            "SELECT id FROM coordinator_events WHERE created_at >= ? ORDER BY id LIMIT 1",
             (cutoff,),
-            batch_rows,
-        )
+        ).fetchone()
+        boundary = int(first_young[0]) if first_young else 2**63 - 1
+        batch = max(1, int(batch_rows))
+        total = 0
+        while True:
+            rows = [
+                dict(r) for r in self._conn().execute(
+                    "SELECT * FROM coordinator_events WHERE id < ? ORDER BY id LIMIT ?",
+                    (boundary, batch),
+                ).fetchall()
+            ]
+            if not rows:
+                return total
+            self._archive_batch(lambda a: a.archive_events(rows))
+            with self._write() as conn:
+                # The batch is the whole id-ordered prefix below the boundary, so
+                # its id range holds exactly these rows (AUTOINCREMENT never
+                # reuses a lower id).
+                total += conn.execute(
+                    "DELETE FROM coordinator_events WHERE id BETWEEN ? AND ?",
+                    (rows[0]["id"], rows[-1]["id"]),
+                ).rowcount
+            if len(rows) < batch:
+                return total
 
     def reclaim_space(self) -> str:
         """Return pages freed by pruning to the OS (A93). For a store only this
@@ -1433,6 +1660,7 @@ class QuotaWindowCoordinator:
         snapshot_retention_days: int = _SNAPSHOT_RETENTION_DAYS,
         event_retention_days: int = _EVENT_RETENTION_DAYS,
         reclaim_space: bool = False,
+        archive_enabled: bool = True,
     ) -> None:
         self.store = store
         self.adapters = list(adapters)
@@ -1445,6 +1673,8 @@ class QuotaWindowCoordinator:
         self.event_retention_days = int(event_retention_days)
         #: Only for a store this process owns alone (the worker-local cache).
         self.reclaim_space = bool(reclaim_space)
+        #: Archive every pruned row to ``quota_archive.db`` before deleting it.
+        self.archive_enabled = bool(archive_enabled)
         self._now = now
         self._event_handlers = list(event_handlers or [])
         self._task: Optional[asyncio.Task] = None
@@ -1509,25 +1739,49 @@ class QuotaWindowCoordinator:
         ``_observe_loop`` on the controller and by the prewarmer's tick on the
         worker (which never starts this loop). Runs off the event loop thread:
         the DELETEs can scan tens of thousands of rows and must never block
-        heartbeats/HTTP handling while they run."""
+        heartbeats/HTTP handling while they run.
+
+        With ``archive_enabled`` every batch is archived to ``quota_archive.db``
+        before it is deleted; if archiving fails nothing more is deleted, the
+        failure is logged as ``quota_archive_failed`` and the day stays unmarked
+        so the next tick retries."""
         try:
             today = utc_iso(self._now())[:10]
             if self._last_prune_day == today:
                 return
             if self.snapshot_retention_days <= 0 and self.event_retention_days <= 0:
                 return
-            pruned = await asyncio.to_thread(self.store.prune_snapshots, retention_days=self.snapshot_retention_days)
+            archive = self.archive_enabled
+            now = self._now()
+            pruned = await asyncio.to_thread(
+                self.store.prune_snapshots, retention_days=self.snapshot_retention_days, now=now, archive=archive,
+            )
             if pruned:
-                logger.info("event=quota_snapshots_pruned rows=%d retention_days=%d", pruned, self.snapshot_retention_days)
-            events = await asyncio.to_thread(self.store.prune_events, retention_days=self.event_retention_days)
+                logger.info(
+                    "event=quota_snapshots_pruned rows=%d retention_days=%d archived=%s",
+                    pruned, self.snapshot_retention_days, archive,
+                )
+            events = await asyncio.to_thread(
+                self.store.prune_events, retention_days=self.event_retention_days, now=now, archive=archive,
+            )
             if events:
-                logger.info("event=quota_events_pruned rows=%d retention_days=%d", events, self.event_retention_days)
+                logger.info(
+                    "event=quota_events_pruned rows=%d retention_days=%d archived=%s",
+                    events, self.event_retention_days, archive,
+                )
             self._last_prune_day = today
-            if self.reclaim_space and (pruned or events):
-                mode = await asyncio.to_thread(self.store.reclaim_space)
-                logger.info("event=quota_store_space_reclaimed mode=%s", mode)
+        except QuotaArchiveError as e:
+            logger.warning("event=quota_archive_failed err=%s", e)
+            return
         except Exception as e:
             logger.warning("event=quota_snapshot_prune_failed err=%s", e)
+            return
+        if self.reclaim_space and (pruned or events):
+            try:
+                mode = await asyncio.to_thread(self.store.reclaim_space)
+                logger.info("event=quota_store_space_reclaimed mode=%s", mode)
+            except Exception as e:
+                logger.warning("event=quota_store_reclaim_failed err=%s", e)
 
     def next_observe_delay_sec(self, *, snapshots: Optional[List[Dict[str, Any]]] = None) -> int:
         now = normalize_utc(self._now()) or utc_now()
@@ -1774,6 +2028,7 @@ def build_quota_coordinator_from_config(
     lead = int(getattr(quota_cfg, "reset_probe_lead_sec", 900))
     retention = int(getattr(quota_cfg, "snapshot_retention_days", _SNAPSHOT_RETENTION_DAYS))
     event_retention = int(getattr(quota_cfg, "event_retention_days", _EVENT_RETENTION_DAYS))
+    archive_enabled = bool(getattr(quota_cfg, "archive_enabled", True))
     adapters = build_default_quota_adapters() if observe_locally else []
     return QuotaWindowCoordinator(
         store=QuotaWindowStore(db_path),
@@ -1786,6 +2041,7 @@ def build_quota_coordinator_from_config(
         snapshot_retention_days=retention,
         event_retention_days=event_retention,
         reclaim_space=reclaim_space,
+        archive_enabled=archive_enabled,
     )
 
 
