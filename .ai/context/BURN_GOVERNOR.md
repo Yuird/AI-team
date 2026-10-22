@@ -1,8 +1,13 @@
 # Burn-down governor — procedure (TEMPORARY scaffolding)
 
 Temporary coordination for the 2026-10 backlog burn-down on `Yuird/AI-team` (the cloud working /
-integration repo). `nydiokar/AI-team` is downstream: the owner promotes validated batches there by
-hand. Nothing in the product may depend on this mechanism. When the burn-down ends, delete this file,
+integration repo). `nydiokar/AI-team` is production. The owner promotes each merged burn PR there by
+hand, as a scoped `feat/<slug>-upstream` branch rebased onto `nydiokar/main`; whole-tree merges are
+rejected (see #17). Upstream also moves on its own. When the owner asks, `main` here is re-synced
+from `nydiokar/main` with a **merge commit**, never a squash, so upstream SHAs stay ancestors. That
+keeps `src/`/`tests/`/`web/` code-identical to upstream. Re-run step 3 after every sync, because
+upstream may have landed a burn issue's work itself. Nothing in the product may depend on this
+mechanism. When the burn-down ends, delete this file,
 `BURN_REVIEWER.md`, `.claude/rules/cloud-burn.md` and the timer.
 
 ## Mechanism (what actually runs)
