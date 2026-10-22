@@ -5,8 +5,8 @@ status: done              # ready | active | blocked | done | dead
 owner: cloud-burn #7
 depends_on: []
 results_ref: DISPATCH_LOG.md#A62             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: ["tests/test_runtime_flag_typed.py",".ai/dispatch/evidence/A62_OPS_FLAG_E2E.md"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-22T12:03:12.965554+00:00"
+evidence: ["tests/test_runtime_flag_typed.py","tests/test_ops_flag_migrate.py",".ai/dispatch/evidence/A62_OPS_FLAG_E2E.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-22T17:57:54.552465+00:00"
 ```
 
 # DISPATCH — A62 · Runtime flag registry: extend beyond booleans to numeric/string knobs
@@ -148,11 +148,13 @@ boolean entries' semantics.
   booted ceiling. `/health` `governor` and the A65 cost-alert lever read the same seam.
   Worker snapshot row cap raised 32 → 32 768 chars so a long `str` row (overlay) can't reject the
   whole snapshot and strand the governor rows.
-- **R2 (null):** PUT `null` ⇒ empty row = explicit "no cap" overriding env; non-positive = no cap
-  (env convention); DELETE ⇒ env → default.
+- **R2 (null):** PUT `null` ⇒ empty row = explicit "no cap" overriding env — the ONLY way to store
+  no cap: a governor PUT of <= 0 is a 422 ("use null for no cap"), and a non-positive row (direct DB
+  write only) is ignored ⇒ env. DELETE ⇒ env → default. `ops_flag.sh migrate` never pins a null
+  knob, so a later `.env` cap still applies (review on PR #23, 2026-10-22).
 - **R3:** the other env keys stay out of scope (follow-up job, unfiled).
-- **Proof:** `tests/test_runtime_flag_typed.py` (24 tests; 4 fail without the src change) + related
-  modules: 243 passed. CLI transcript: `.ai/dispatch/evidence/A62_OPS_FLAG_E2E.md`.
+- **Proof:** `tests/test_runtime_flag_typed.py` (30) + `tests/test_ops_flag_migrate.py` (2, runs the
+  real script against an in-process API) + related modules: 293 passed. CLI transcript: `.ai/dispatch/evidence/A62_OPS_FLAG_E2E.md`.
 - **Operator-gated remainder (deploy):** gateway redeploy (control plane) AND a worker restart on
   each claude-capable worker before a registry write reaches the worker-side SDK driver. Until then
   a worker on old code keeps its own env ceilings (safe fallback). Not performed by the agent.
