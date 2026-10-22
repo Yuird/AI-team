@@ -81,6 +81,13 @@ make CI or a reviewer reject it.
   the operator or governor during the burn-down. This deliberately overrides the root
   `CLAUDE.md` "merge it yourself" rule.
 - Never carry another workstream's edits into your branch.
+- **Your branch must transport cleanly to `nydiokar/AI-team`.** Upstream accepts only
+  scoped `feat/*` changes that apply to its current `main`. It rejected #17, a whole-tree
+  merge. This repo's `main` is kept code-identical to upstream, so a branch cut from it
+  with only your commits rebases cleanly. Before opening the PR, run
+  `git fetch https://github.com/nydiokar/AI-team main` and confirm that
+  `git merge-tree --write-tree FETCH_HEAD HEAD` reports no conflicts in `src/`,
+  `tests/` or `web/`. If upstream moved under you, rebase onto it and say so in the PR.
 
 ## Coordination labels
 The roadmap, label legend and dispatch order live in the tracker issue **#13**.
