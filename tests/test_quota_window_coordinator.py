@@ -1726,3 +1726,85 @@ def test_concurrent_archiving_pruners_count_each_event_once(tmp_path):
     assert _count(a, "coordinator_events") == sum(1 for e in events if e[3] >= cutoff)
     archived = arch.execute("SELECT COUNT(*) FROM snapshots_archive").fetchone()[0]
     assert archived + _count(a, "snapshots") == 2 * 80 * 24
+
+
+def _old_events(store, n, *, name, now, days=20):
+    _seed_event_rows(store, [(name, "", f'{{"n": {i}}}', utc_iso(now - timedelta(days=days, seconds=-i))) for i in range(n)])
+
+
+def _archived_total(store, name=None):
+    sql = "SELECT COALESCE(SUM(count), 0) FROM event_runs" + (" WHERE event_name = ?" if name else "")
+    return _archive_conn(store).execute(sql, (name,) if name else ()).fetchone()[0]
+
+
+def test_recreated_store_under_a_surviving_archive_loses_nothing(tmp_path):
+    """Round-2 blocker: a rebuilt store restarts its ids at 1; they must not be
+    mistaken for ids the archive already holds for the OLD store."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "quota.db"
+    old = QuotaWindowStore(path)
+    _old_events(old, 100, name="quota.adapter_unavailable", now=now)
+    assert old.prune_events(retention_days=14, now=now, archive=True) == 100
+    old.close()
+    for f in tmp_path.glob("quota.db*"):
+        f.unlink()                                              # archive survives
+
+    new = QuotaWindowStore(path)
+    _old_events(new, 50, name="quota.refusal_recorded", now=now)
+    assert new.prune_events(retention_days=14, now=now, archive=True) == 50
+
+    assert _archived_total(new, "quota.refusal_recorded") == 50
+    assert _archived_total(new) == 150
+    stores = _archive_conn(new).execute("SELECT COUNT(DISTINCT store_id) FROM event_runs").fetchone()[0]
+    assert stores == 2
+
+
+def test_restored_older_store_copy_rotates_identity_instead_of_losing_rows(tmp_path):
+    """Same store identity, ids reused: a backup restored after the archive
+    moved on. Rows the archive never took are archived under a new identity."""
+    import shutil
+    import sqlite3
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "quota.db"
+    store = QuotaWindowStore(path)
+    _old_events(store, 100, name="quota.adapter_unavailable", now=now, days=30)
+    store.store_id()
+    backup = tmp_path / "backup.db"
+    src = sqlite3.connect(str(path)); dst = sqlite3.connect(str(backup))
+    src.backup(dst); src.close(); dst.close()
+
+    store.prune_events(retention_days=14, now=now, archive=True)            # archives ids 1..100
+    _old_events(store, 60, name="quota.duplicate_snapshot", now=now, days=25)
+    store.prune_events(retention_days=14, now=now, archive=True)            # archives ids 101..160
+    store.close()
+    for f in tmp_path.glob("quota.db*"):
+        f.unlink()
+    shutil.copy(backup, path)                                               # ids 1..100 again, seq 100
+
+    restored = QuotaWindowStore(path)
+    _old_events(restored, 30, name="quota.refusal_recorded", now=now)        # ids 101..130 reused
+    restored.prune_events(retention_days=14, now=now, archive=True)
+
+    assert _count(restored, "coordinator_events") == 0
+    assert _archived_total(restored, "quota.refusal_recorded") == 30        # nothing lost
+    assert _archived_total(restored, "quota.duplicate_snapshot") == 60
+
+
+def test_event_inserted_mid_pass_survives(tmp_path, monkeypatch):
+    from src.services import quota_window_coordinator as qwc
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    _old_events(store, 4, name="quota.adapter_unavailable", now=now)
+    real = qwc.QuotaArchive.archive_events
+
+    def archive_then_new_event(self, rows, **kw):
+        real(self, rows, **kw)
+        if not store._conn().execute("SELECT 1 FROM coordinator_events WHERE event_name = 'fresh'").fetchone():
+            store.add_event("fresh")
+
+    monkeypatch.setattr(qwc.QuotaArchive, "archive_events", archive_then_new_event)
+    assert store.prune_events(retention_days=14, now=now, archive=True, batch_rows=4) == 4
+    left = [r[0] for r in store._conn().execute("SELECT event_name FROM coordinator_events")]
+    assert left == ["fresh"]

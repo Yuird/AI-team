@@ -134,12 +134,26 @@ Gateway, task-server, local-execution gateway and tests never install a client �
   same `(event_name, provider, principal_hash, bucket_id, reason)` becomes one row with
   `first_id`/`last_id`, `first_at`/`last_at`, `count` and first/last payload. This is lossless for
   timing and counts, and a singleton such as `quota.refusal_recorded` keeps its payload. The
-  archive takes the contiguous `id` prefix older than the cutoff, so a row stamped in the future by
-  clock skew holds back the rows after it until it ages out.
-  **The archive is not a cache and is never pruned or vacuumed.** Expected size (estimated, not
-  measured): the 2.5-month worker backlog is about 31k snapshot rows plus a few thousand event runs
-  (its 193k noise events are long identical runs), so a few MB. Growth is about 500 snapshot
-  rows/day per side, or roughly 30–40 MB/year. With the flag off, pruning deletes without archiving.
+  archive takes the contiguous `id` prefix older than the cutoff, up to the newest row present when
+  the pass starts. A row stamped in the future by clock skew holds back the rows after it until it
+  ages out, and an event written mid-pass is never taken.
+  Event ids only mean something inside one store file, so runs are keyed by the store's identity:
+  a random `store_id` kept in the store's own `store_meta` table, created on the first archive pass.
+  A rebuilt store gets a new identity, so its ids never collide with archived ones. A row at or below
+  the archive's watermark is skipped only when an archived run of the same store covers it (same id
+  range, same key, `created_at` inside the run's span). Any other such row means a store was restored
+  from an older copy under a newer archive. The pass then rotates the store's identity
+  (`event=quota_store_identity_rotated`) and archives the remaining rows again under the new one. Those
+  rows may be counted twice, across two `store_id`s, but none is deleted unarchived.
+  **The archive is not a cache and is never pruned or vacuumed.** Size, measured 2026-10-22 with a
+  64-hex `principal_hash` after a WAL checkpoint: **≈ 500 B per `snapshots_archive` row** and
+  **≈ 530 B per `event_runs` row**. At about 500 snapshot rows/day per side, snapshots add
+  **≈ 90 MB/year per side**; the worker's 31k-row backlog is ≈ 15 MB. Event runs are bounded above by
+  one row per event, which in the worst case of zero compaction is ≈ 270 MB/year on the worker (1.4k
+  events/day) and ≈ 1 GB/year on the controller (5k/day). The live noise comes in long identical
+  runs, so the real figure should be far lower, but the compaction ratio is not measured: check
+  `SELECT COUNT(*), SUM(count) FROM event_runs` after the first live pass. With the flag off, pruning
+  deletes without archiving.
   **Correlating quota burn with sessions.** Copy the archive next to the controller's `mesh.db`
   (each side's archive lives on its own host) and run from `sqlite3 mesh.db`:
   ```sql

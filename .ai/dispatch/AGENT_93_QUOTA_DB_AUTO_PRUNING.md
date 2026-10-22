@@ -96,6 +96,12 @@ done-gate (per the issue).
   `event=quota_archive_failed` is logged, and the day stays unmarked so the pass retries.
   `QUOTA_ARCHIVE_ENABLED` defaults to on. With it off, behaviour is the pre-amendment one and no
   archive file is created. The archive is never pruned.
+- **Store identity (round-2 review).** `event_runs` is keyed by `(store_id, first_id)`, where
+  `store_id` is a random id kept in the store's `store_meta` table. A rebuilt store gets a new identity.
+  A row at or below the watermark is skipped only when a run of the same store covers it. Otherwise
+  the store was restored from an older copy, so the pass rotates its identity and re-archives: rows may
+  be counted twice, but none is deleted unarchived. The archive pass also caps its boundary at the
+  newest row present when it starts, so an event written mid-pass survives.
 - **One seam.** `QuotaWindowCoordinator._prune_once_daily` is renamed to `prune_once_daily` and now
   prunes `snapshots` and `coordinator_events`. The controller still drives it from `_observe_loop`.
   The worker's `QuotaWindowPrewarmer.tick_once` now calls it after its observe, through the same
@@ -111,6 +117,7 @@ done-gate (per the issue).
   `auto_vacuum=INCREMENTAL` and runs one `VACUUM`, and later passes run `incremental_vacuum`. Both
   then do a WAL TRUNCATE checkpoint. The shared controller file is never vacuumed.
 - **Proof:** `tests/test_quota_window_coordinator.py`: the A93 section (9 tests) and the archive
-  section (7 tests, including an 80-day backfill), all failing without the change; with the
-  unchanged coordinator and prewarmer suites, 87 passed.
+  section (10 tests, including an 80-day backfill, a rebuilt store and a restored store under a
+  surviving archive), all failing without the change; with the unchanged coordinator and prewarmer
+  suites, 90 passed.
 - **Bound** documented in `docs/backend/DATABASE_AUTHORITY.md` §4 R2.

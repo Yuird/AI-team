@@ -14,6 +14,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -387,7 +388,8 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_archive_bucket_observed
     ON snapshots_archive(provider, principal_hash, bucket_id, observed_at);
 
 CREATE TABLE IF NOT EXISTS event_runs (
-    first_id INTEGER PRIMARY KEY,
+    store_id TEXT NOT NULL,
+    first_id INTEGER NOT NULL,
     last_id INTEGER NOT NULL,
     event_name TEXT NOT NULL,
     provider TEXT NOT NULL,
@@ -398,8 +400,12 @@ CREATE TABLE IF NOT EXISTS event_runs (
     last_at TEXT NOT NULL,
     count INTEGER NOT NULL,
     first_payload TEXT NOT NULL,
-    last_payload TEXT NOT NULL
+    last_payload TEXT NOT NULL,
+    PRIMARY KEY (store_id, first_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_event_runs_store_last
+    ON event_runs(store_id, last_id);
 
 CREATE INDEX IF NOT EXISTS idx_event_runs_name_first_at
     ON event_runs(event_name, first_at);
@@ -417,6 +423,12 @@ class QuotaArchiveError(RuntimeError):
     """Archiving a prune batch failed; that batch was NOT deleted (A93)."""
 
 
+class QuotaStoreIdentityConflict(QuotaArchiveError):
+    """A store row sits inside an id range the archive already holds for this
+    store identity, but no archived run accounts for it — the store was rebuilt
+    or restored from an older copy while its archive survived (A93)."""
+
+
 class QuotaArchive:
     """Append-only quota history next to the store (A93).
 
@@ -426,7 +438,9 @@ class QuotaArchive:
     same ``(event_name, provider, principal_hash, bucket_id, reason)`` is one
     row carrying its id range, first/last time, count and first/last payload —
     lossless for timing and counts, and a singleton (a refusal) keeps its
-    payload. Short-lived connections: it is written once per prune batch."""
+    payload. Runs are scoped by the store's identity (``store_id``): event ids
+    are only meaningful within one store file. Short-lived connections: it is
+    written once per prune batch."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
@@ -437,7 +451,14 @@ class QuotaArchive:
         conn = sqlite3.connect(str(self._path), isolation_level=None, timeout=5.0)
         try:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL;")
+            if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+                # Switching modes is not covered by the busy timeout; WAL is
+                # persistent, so losing this race to a concurrent opener is fine.
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL;")
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower():
+                        raise
             conn.executescript(_ARCHIVE_DDL)
             conn.execute("BEGIN IMMEDIATE;")
             try:
@@ -459,23 +480,46 @@ class QuotaArchive:
                 [tuple(r.get(c) for c in _SNAPSHOT_COLUMNS) + (archived_at,) for r in rows],
             )
 
-    def archive_events(self, rows: List[Dict[str, Any]]) -> None:
-        """Fold id-ordered ``rows`` into ``event_runs``. The watermark
-        (``MAX(last_id)``) is read inside the write transaction, so a retried or
-        concurrent pass never counts an event twice; the newest run is extended
-        when the next event continues it."""
+    def archive_events(self, rows: List[Dict[str, Any]], *, store_id: str) -> None:
+        """Fold id-ordered ``rows`` from the store identified by ``store_id``
+        into ``event_runs``. That store's watermark (``MAX(last_id)``) is read
+        inside the write transaction, so a retried or concurrent pass never
+        counts an event twice; the newest run is extended when the next event
+        continues it.
+
+        A row at or below the watermark is skipped ONLY when an archived run of
+        this store covers it — same id range, same identity key, ``created_at``
+        within the run's time span. Anything else means the store's ids were
+        reused (rebuilt or restored store under a surviving archive): raise
+        ``QuotaStoreIdentityConflict`` and write nothing, so no row is ever
+        deleted without its archive copy."""
 
         def key(r: Dict[str, Any]) -> tuple:
             return (r["event_name"], r["provider"], r["principal_hash"], r["bucket_id"], r["reason"])
 
         with self._write() as conn:
-            last = conn.execute("SELECT * FROM event_runs ORDER BY last_id DESC LIMIT 1").fetchone()
+            last = conn.execute(
+                "SELECT * FROM event_runs WHERE store_id = ? ORDER BY last_id DESC LIMIT 1", (store_id,),
+            ).fetchone()
             watermark = int(last["last_id"]) if last else 0
             current: Optional[Dict[str, Any]] = dict(last) if last else None
             is_new = False
             dirty: List[tuple[Dict[str, Any], bool]] = []
             for r in sorted(rows, key=lambda row: row["id"]):
                 if int(r["id"]) <= watermark:
+                    covering = conn.execute(
+                        "SELECT * FROM event_runs WHERE store_id = ? AND first_id <= ? AND last_id >= ?",
+                        (store_id, r["id"], r["id"]),
+                    ).fetchone()
+                    if (
+                        covering is None
+                        or key(dict(covering)) != key(r)
+                        or not (covering["first_at"] <= r["created_at"] <= covering["last_at"])
+                    ):
+                        raise QuotaStoreIdentityConflict(
+                            f"store {store_id} event id {r['id']} is at or below the archive watermark "
+                            f"{watermark} but no archived run accounts for it"
+                        )
                     continue
                 if current is not None and key(current) == key(r):
                     current.update(last_id=r["id"], last_at=r["created_at"], last_payload=r["payload"])
@@ -484,6 +528,7 @@ class QuotaArchive:
                     if current is not None:
                         dirty.append((current, is_new))
                     current = {
+                        "store_id": store_id,
                         "first_id": r["id"], "last_id": r["id"], "event_name": r["event_name"],
                         "provider": r["provider"], "principal_hash": r["principal_hash"],
                         "bucket_id": r["bucket_id"], "reason": r["reason"],
@@ -496,18 +541,18 @@ class QuotaArchive:
             for run, new in dirty:
                 if new:
                     conn.execute(
-                        "INSERT OR IGNORE INTO event_runs(first_id, last_id, event_name, provider,"
+                        "INSERT INTO event_runs(store_id, first_id, last_id, event_name, provider,"
                         " principal_hash, bucket_id, reason, first_at, last_at, count, first_payload,"
-                        " last_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (run["first_id"], run["last_id"], run["event_name"], run["provider"],
+                        " last_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (store_id, run["first_id"], run["last_id"], run["event_name"], run["provider"],
                          run["principal_hash"], run["bucket_id"], run["reason"], run["first_at"],
                          run["last_at"], run["count"], run["first_payload"], run["last_payload"]),
                     )
                 else:
                     conn.execute(
                         "UPDATE event_runs SET last_id = ?, last_at = ?, count = ?, last_payload = ?"
-                        " WHERE first_id = ?",
-                        (run["last_id"], run["last_at"], run["count"], run["last_payload"], run["first_id"]),
+                        " WHERE store_id = ? AND first_id = ?",
+                        (run["last_id"], run["last_at"], run["count"], run["last_payload"], store_id, run["first_id"]),
                     )
 
 
@@ -754,11 +799,38 @@ class QuotaWindowStore:
         """The append-only history archive that sits next to this store (A93)."""
         return self._path.with_name(_ARCHIVE_FILENAME)
 
+    def store_id(self) -> str:
+        """This store file's identity (A93): a random id kept IN the store, so
+        a rebuilt store gets a new one and archived event ids can never be
+        mistaken for its own. Created lazily, only on the archive path."""
+        with self._write() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "INSERT OR IGNORE INTO store_meta(key, value) VALUES ('store_id', ?)", (uuid.uuid4().hex,),
+            )
+            return str(conn.execute("SELECT value FROM store_meta WHERE key = 'store_id'").fetchone()[0])
+
+    def _rotate_store_id(self, previous: str) -> str:
+        """Give the store a fresh identity after an identity conflict (a store
+        restored from an older copy keeps its old id). Compare-and-set, so
+        concurrent pruners converge on one new id. Rows still present are then
+        archived again under the new id: possibly counted twice, never lost."""
+        with self._write() as conn:
+            conn.execute(
+                "UPDATE store_meta SET value = ? WHERE key = 'store_id' AND value = ?",
+                (uuid.uuid4().hex, previous),
+            )
+            current = str(conn.execute("SELECT value FROM store_meta WHERE key = 'store_id'").fetchone()[0])
+        logger.warning("event=quota_store_identity_rotated previous=%s current=%s", previous, current)
+        return current
+
     def _archive_batch(self, write: Callable[["QuotaArchive"], None]) -> None:
         """Archive one prune batch BEFORE it is deleted. Any failure raises
         ``QuotaArchiveError`` so the caller deletes nothing."""
         try:
             write(QuotaArchive(self.archive_path))
+        except QuotaStoreIdentityConflict:
+            raise
         except Exception as exc:
             raise QuotaArchiveError(f"{type(exc).__name__}: {exc}") from exc
 
@@ -842,11 +914,18 @@ class QuotaWindowStore:
                 (cutoff,),
                 batch_rows,
             )
+        # The pass works below a boundary fixed at its start: the first row that
+        # is not yet old, capped at the newest row present, so an event that
+        # arrives mid-pass is never taken.
         first_young = self._conn().execute(
             "SELECT id FROM coordinator_events WHERE created_at >= ? ORDER BY id LIMIT 1",
             (cutoff,),
         ).fetchone()
-        boundary = int(first_young[0]) if first_young else 2**63 - 1
+        newest = self._conn().execute("SELECT MAX(id) FROM coordinator_events").fetchone()[0]
+        if newest is None:
+            return 0
+        boundary = min(int(first_young[0]) if first_young else int(newest) + 1, int(newest) + 1)
+        store_id = self.store_id()
         batch = max(1, int(batch_rows))
         total = 0
         while True:
@@ -858,7 +937,11 @@ class QuotaWindowStore:
             ]
             if not rows:
                 return total
-            self._archive_batch(lambda a: a.archive_events(rows))
+            try:
+                self._archive_batch(lambda a: a.archive_events(rows, store_id=store_id))
+            except QuotaStoreIdentityConflict:
+                store_id = self._rotate_store_id(store_id)
+                self._archive_batch(lambda a: a.archive_events(rows, store_id=store_id))
             with self._write() as conn:
                 # The batch is the whole id-ordered prefix below the boundary, so
                 # its id range holds exactly these rows (AUTOINCREMENT never
