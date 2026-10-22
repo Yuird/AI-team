@@ -205,7 +205,8 @@ def test_governor_non_positive_put_is_422_null_is_the_only_no_cap(client, flag, 
     assert db_mod.get_db().get_runtime_flag(flag) is None
 
 
-def test_non_positive_registry_row_is_ignored_not_unlimited(monkeypatch):
+@pytest.mark.parametrize("raw", ["0", "-1", "inf", "nan", "abc"])
+def test_non_positive_registry_row_is_ignored_not_unlimited(monkeypatch, raw):
     # Only a direct DB write can bypass the PUT check; the resolver must still
     # fall back to env rather than read it as "no cap".
     import config as _config_pkg
@@ -214,7 +215,7 @@ def test_non_positive_registry_row_is_ignored_not_unlimited(monkeypatch):
     with db_mod.get_db()._write() as conn:
         conn.execute(
             "INSERT INTO runtime_flags(flag_name, value, source, set_at, set_by) VALUES (?, ?, ?, ?, ?)",
-            ("CLAUDE_SDK_MAX_BUDGET_USD", "0", "test", "2026-10-22T00:00:00Z", "test"),
+            ("CLAUDE_SDK_MAX_BUDGET_USD", raw, "test", "2026-10-22T00:00:00Z", "test"),
         )
     assert db_mod.sdk_governor_ceilings()["sdk_max_budget_usd"] == 5.0
 

@@ -732,13 +732,16 @@ def sdk_governor_ceilings() -> Dict[str, Any]:
 
     The env/default layer is the existing ``config.claude`` parse (A53), so with
     no registry row the result is byte-identical to the pre-A62 config read. A
-    registry row wins: empty (null) ⇒ ``None`` (no cap). Writes reject <= 0, so a
-    non-positive or unparseable row (only reachable by a direct DB write) is
-    ignored with a warning and env applies — never read as "unlimited". Rows
+    registry row wins: empty (null) ⇒ ``None`` (no cap). Writes reject <= 0 and
+    non-finite values, so a non-positive, non-finite or unparseable row (only
+    reachable by a direct DB write) is ignored with a warning and env applies —
+    never read as "unlimited". Rows
     resolve through ``_runtime_flag_row`` — the local DB on a controller, the A88
     controller snapshot on a worker (memory-only); a worker without a snapshot
     (old controller, unreachable) falls back to env.
     Never raises: a glitch here must not block a session boot."""
+    import math
+
     out: Dict[str, Any] = {attr: None for _flag, attr in _SDK_GOVERNOR_FLAGS}
     try:
         from config import config as _cfg
@@ -752,7 +755,7 @@ def sdk_governor_ceilings() -> Dict[str, Any]:
             continue
         try:
             parsed = _parse_runtime_flag_raw(runtime_flag_value_type(flag), str(row.get("value") or ""))
-            valid = parsed is None or parsed > 0
+            valid = parsed is None or (math.isfinite(parsed) and parsed > 0)
         except ValueError:
             valid = False
         if not valid:
