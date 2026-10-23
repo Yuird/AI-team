@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_93_QUOTA_DB_AUTO_PRUNING
 created_at: "2026-10-01T22:25:00+00:00"
-status: ready
+status: active
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A93
-evidence: []
-updated_at: "2026-10-01T22:25:00+00:00"
+evidence: tests/test_quota_window_coordinator.py
+updated_at: "2026-10-22T18:00:52.949035+00:00"
 ```
 
 # DISPATCH — A93 · Bounded retention for `quota_windows.db` (worker + controller)
@@ -71,9 +71,67 @@ Root causes (verify in the tree before changing):
 
 ## Milestone (burndown)
 
-- [ ] Readers of `coordinator_events` inventoried; retention window chosen and recorded
-- [ ] Worker-path + controller-path daily retention (snapshots + events), batched
-- [ ] Space reclamation decision implemented for the worker cache
-- [ ] Tests green; PR merged; operator-restarted worker shows `quota_snapshots_pruned` / events pruned
+- [x] Readers of `coordinator_events` inventoried; retention window chosen and recorded
+- [x] Worker-path + controller-path daily retention (snapshots + events), batched
+- [x] Space reclamation decision implemented for the worker cache
+- [x] Tests green (PR: issue #6, branch `feat/quota-db-auto-pruning`)
+- [x] Owner amendment (PR #22 review, 2026-10-22): archive to `quota_archive.db` before every delete
+- [ ] PR #22 merged (A93 stays `active` until then, per the review)
+- [ ] Operator step, BEFORE the worker restart: `sqlite3 state/quota_windows.db ".backup state/quota_windows.pre-a93.db"`
+  then `gzip state/quota_windows.pre-a93.db` on the worker host
+- [ ] Operator step: restart the worker on merged code (and redeploy the gateway); then check the
+  worker log for `quota_snapshots_pruned` / `quota_events_pruned` / `quota_store_space_reclaimed`
+  and that `state/quota_archive.db` holds the pre-cutoff history
 
 ## Closure (fill on completion)
+**2026-10-22 — implementation complete on PR #22; `active` until it merges.** The first version was
+reviewed PASS, then the owner amended the scope: history must be archived before it is pruned. The
+live row-count check after the operator restarts the worker is a noted operator step, not the
+done-gate (per the issue).
+- **Archive before delete (amendment).** `QuotaArchive` writes `quota_archive.db` next to the store:
+  `snapshots_archive` (full fidelity, `INSERT OR IGNORE` on `snapshot_id`) and `event_runs`
+  (consecutive identical events compacted; counts and timing lossless; the watermark `MAX(last_id)` is
+  read inside the archive's write transaction, so retries and concurrent passes never double-count).
+  Each batch is archived, then deleted. If archiving fails, the batch is not deleted,
+  `event=quota_archive_failed` is logged, and the day stays unmarked so the pass retries.
+  `QUOTA_ARCHIVE_ENABLED` defaults to on. With it off, behaviour is the pre-amendment one and no
+  archive file is created. The archive is never pruned.
+- **Store identity (round-2 review).** `event_runs` is keyed by `(store_id, first_id)`, where
+  `store_id` is a random id kept in the store's `store_meta` table. A rebuilt store gets a new identity.
+  A row at or below the watermark is skipped only when a run of the same store covers it. Otherwise
+  the store was restored from an older copy, so the pass rotates its identity and re-archives: rows may
+  be counted twice, but none is deleted unarchived. The archive pass also caps its boundary at the
+  newest row present when it starts, so an event written mid-pass survives.
+- **One seam.** `QuotaWindowCoordinator._prune_once_daily` is renamed to `prune_once_daily` and now
+  prunes `snapshots` and `coordinator_events`. The controller still drives it from `_observe_loop`.
+  The worker's `QuotaWindowPrewarmer.tick_once` now calls it after its observe, through the same
+  per-UTC-day guard. There is no second scheduler.
+- **Readers of `coordinator_events`.** None in `src/`, `web/` or `scripts/`. The only readers are
+  three tests that read back events written in the same test. The Telegram digest consumes events in
+  memory via `event_handlers`. Window: `QUOTA_EVENT_RETENTION_DAYS` = 14, matching snapshots.
+  Write-time dedup of `quota.duplicate_snapshot` / `quota.adapter_unavailable` was considered and
+  not done, because age retention already bounds them and changing what is emitted is out of scope.
+- **Batched.** `QuotaWindowStore._delete_batched` runs `DELETE … LIMIT 5000` with one write
+  transaction per batch. The A78 ROW_NUMBER anchor exclusion is reused unchanged inside each batch.
+- **Space.** Only the worker passes `reclaim_space=True` (`src/worker/agent.py`). Its first pass sets
+  `auto_vacuum=INCREMENTAL` and runs one `VACUUM`, and later passes run `incremental_vacuum`. Both
+  then do a WAL TRUNCATE checkpoint. The shared controller file is never vacuumed.
+- **Proof:** `tests/test_quota_window_coordinator.py`: the A93 section (9 tests) and the archive
+  section (10 tests, including an 80-day backfill, a rebuilt store and a restored store under a
+  surviving archive), all failing without the change; with the unchanged coordinator and prewarmer
+  suites, 90 passed.
+- **Bound** documented in `docs/backend/DATABASE_AUTHORITY.md` §4 R2.
+
+**2026-10-23 — merged upstream; still `active` until deployed and live-checked.** The reviewed head
+`6be256b` (Yuird PR #22, final review PASS r3) landed as nydiokar/AI-team#245, with the code identical.
+The owner's follow-up nydiokar/AI-team#248 fixed three defects that the reviews missed:
+- Snapshot anchors now cluster `reset_at` within `_BOUNDARY_JITTER`. Exact-string anchors kept 25.4k
+  of the 25.9k old controller rows, so the controller store was not actually bounded.
+- `reclaim_space` now steps `incremental_vacuum` to completion. Before, it freed only one page per
+  call, and the test had been loosened to `after < before`.
+- Singleton event runs store their payload once. In the rehearsal this cut the worker archive from
+  218 MB to 164 MB.
+
+nydiokar/AI-team#247 adds `quota_archive.db` and the worker-local store to the backups.
+Remaining operator steps: deploy (worker restart plus gateway redeploy) and the live archive checks.
+
