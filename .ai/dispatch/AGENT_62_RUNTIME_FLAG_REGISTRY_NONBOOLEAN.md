@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN
 created_at: "2026-08-01T13:48:33+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: done              # ready | active | blocked | done | dead
+owner: cloud-burn #7
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:20:23.070427+00:00"
+results_ref: DISPATCH_LOG.md#A62             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["tests/test_runtime_flag_typed.py","tests/test_ops_flag_migrate.py",".ai/dispatch/evidence/A62_OPS_FLAG_E2E.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-22T17:57:54.552465+00:00"
 ```
 
 # DISPATCH — A62 · Runtime flag registry: extend beyond booleans to numeric/string knobs
@@ -125,13 +125,36 @@ boolean entries' semantics.
 
 ---
 ## Milestone (burndown)
-- [ ] Registry type model extended (`value_type` field + type-aware coerce/validate), 23 existing
-      booleans byte-identical
-- [ ] `RuntimeFlagBody` widened + server-side type validation (422 on mismatch)
-- [ ] `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` added as registry entries, R1/R2 decided
+- [x] Registry type model extended (`value_type` field + type-aware coerce/validate), every existing
+      boolean byte-identical (now 35 bool entries, not 23)
+- [x] `RuntimeFlagBody` widened + server-side type validation (422 on mismatch)
+- [x] `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` added as registry entries, R1/R2 decided
       and documented
-- [ ] `scripts/ops_flag.sh set` command added; `on`/`off`/`migrate` verified compatible
-- [ ] Targeted tests green; PR opened per branch policy
+- [x] `scripts/ops_flag.sh set` command added; `on`/`off`/`migrate` verified compatible
+- [x] Targeted tests green; PR opened per branch policy (burn issue #7; merge is the operator's)
 
 ## Closure (fill on completion)
-(fill when executed)
+**2026-10-22 — done on branch `feat/runtime-flag-registry-nonbool` (burn issue #7, PR closes #7).**
+- **Type model:** `value_type` (`bool|int|float|str`, absent ⇒ `bool`) + `nullable`; values stay
+  TEXT in `runtime_flags.value` — **no mesh schema change**. `coerce_runtime_flag_value` validates
+  writes (bool = the old Pydantic lax-bool contract, stored "1"/"0"; numerics strict);
+  `render_runtime_flag` adds `value_type` and renders typed values. `TOOL_PROFILES_OVERLAY`
+  declared `str` (it always was a JSON string; A108's documented `PUT {"value":"<json>"}` now works).
+- **API:** `RuntimeFlagBody.value: StrictBool|StrictInt|StrictFloat|StrictStr|None`; mismatch ⇒
+  `422 {reason: invalid_flag_value, value_type, message}`.
+- **R1 (scope) = `session_boot`:** `db.sdk_governor_ceilings()` (registry → `config.claude` env parse →
+  no cap) is read by `ClaudeSDKClientDriver._get_or_create` at SDK session-process creation; on a
+  worker the row comes from the A88 controller snapshot (~30 s refresh). Live processes keep their
+  booted ceiling. `/health` `governor` and the A65 cost-alert lever read the same seam.
+  Worker snapshot row cap raised 32 → 32 768 chars so a long `str` row (overlay) can't reject the
+  whole snapshot and strand the governor rows.
+- **R2 (null):** PUT `null` ⇒ empty row = explicit "no cap" overriding env — the ONLY way to store
+  no cap: a governor PUT of <= 0 is a 422 ("use null for no cap"), and a non-positive row (direct DB
+  write only) is ignored ⇒ env. DELETE ⇒ env → default. `ops_flag.sh migrate` never pins a null
+  knob, so a later `.env` cap still applies (review on PR #23, 2026-10-22).
+- **R3:** the other env keys stay out of scope (follow-up job, unfiled).
+- **Proof:** `tests/test_runtime_flag_typed.py` (30) + `tests/test_ops_flag_migrate.py` (2, runs the
+  real script against an in-process API) + related modules: 293 passed. CLI transcript: `.ai/dispatch/evidence/A62_OPS_FLAG_E2E.md`.
+- **Operator-gated remainder (deploy):** gateway redeploy (control plane) AND a worker restart on
+  each claude-capable worker before a registry write reaches the worker-side SDK driver. Until then
+  a worker on old code keeps its own env ceilings (safe fallback). Not performed by the agent.

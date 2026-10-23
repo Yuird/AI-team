@@ -122,7 +122,9 @@ longer only observed.
 - **§2, §5, §4 (controller side):** fixed on `main` before this record (`d8ab63a` `latest_snapshots`,
   `5c92ce3`, `637c487`; `observed_age_sec`, `latest_snapshots`, `prune_snapshots`, volume guards
   `test_latest_snapshots_stays_indexed_on_volume` / `test_prune_snapshots_stays_fast_on_volume`).
-  §4's worker/events remainder belongs to issue #6.
+  §4's worker/events remainder belongs to issue #6. **§4 is now fully covered:** A93 (issue #6,
+  2026-10-22) runs the same retention on the worker's prewarmer path and adds batched
+  `coordinator_events` retention on both sides.
 - **§3 — closed for the default SDK path in PR #18.** The driver mirrors a REJECTED
   `RateLimitEvent` (SDK 0.2.110 yields it through `receive_messages()`) into the turn NDJSON in the
   CLI's wire shape; the existing `_extract_rate_limit_info` → `_usage_limit_class` →
